@@ -6,6 +6,12 @@ services:
     name: ai-crypto-trading-training
     runtime: python
     plan: free
+    # Frankfurt, not the default Oregon: Binance's API refuses requests from
+    # US-hosted IP addresses (HTTP 451 geo-block), which starves 14 of the 15
+    # assets of data. Only HYPE survives on a US host, because Hyperliquid's
+    # API is not geo-blocked. Region is immutable after the service is created
+    # -- to apply this, delete the service and deploy the blueprint again.
+    region: frankfurt
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
     envVars:

@@ -160,11 +160,17 @@ pills, 15 asset switches, capital input), Markets and Portfolio views, a
 clickable stat sub-page per tile (Cash / Invested / Unrealized / Realized /
 Fees), buy/sell drawer, SSE live updates, light/dark themes.
 
-- **i18n**: `I18N` dict with `en`/`hy`/`ru`/`es`, 130 keys each — keep the
-  four languages in exact key parity when adding strings (there is a JSC
+- **i18n**: `I18N` dict with `en`/`hy`/`uk`/`es`/`el`, 130 keys each — keep
+  all five languages in exact key parity when adding strings (there is a JSC
   parity-check pattern in repo history). `t(key, vars)` does `{var}`
-  templating. The brand name "AI Crypto Trading and Training by TT" is never
-  translated.
+  templating. Russian was **removed at the user's request** (replaced by
+  Ukrainian, with Greek added) — do not re-add it. The boot path falls back to
+  `en` when a saved language code no longer exists. The brand name "AI Crypto
+  Trading and Training by TT" is never translated.
+- **Landing state**: `Landing.show()` reads saved settings once per visit;
+  `Landing.render()` must never re-read them — it re-runs on every language
+  switch and after Select All / Clear, and re-reading silently reverts the
+  user's toggles and typed capital (this was a real bug).
 - **Charts**: hand-rolled SVG (`lineChart`), crosshair+tooltip, range pills via
   `rangePills()`. Axis colors are the four validated categorical slots from
   the dataviz skill — every use is direct-labeled, never color-alone.
@@ -181,12 +187,19 @@ rates stay at the values that were safe at the old 120s cycle: klines every
 ## Deployment
 
 `render.yaml` deploys to Render's free tier (deploy-button URL in README).
-Free-tier realities: instance sleeps when idle, disk is ephemeral (portfolio
-resets on restart), and the app keeps **one portfolio per instance** — no user
-accounts. Per-visitor portfolios are the known next step if a shared public
-instance is wanted. A claude.ai Artifact cannot host this: the artifact CSP
-blocks external fetches (no network capability on this account), so live
-prices are unreachable from an artifact page.
+**The region must be non-US** (`region: frankfurt` in the blueprint):
+Binance's API geo-blocks US-hosted IPs with HTTP 451, which starves 14 of 15
+assets — only HYPE survives, because Hyperliquid is not geo-blocked. This
+presented as "No Data for every coin except one" on a default-region (Oregon)
+deployment. Render regions are immutable after creation: applying the fix
+means deleting the service and deploying the blueprint again.
+
+Other free-tier realities: instance sleeps when idle, disk is ephemeral
+(portfolio resets on restart), and the app keeps **one portfolio per
+instance** — no user accounts. Per-visitor portfolios are the known next step
+if a shared public instance is wanted. A claude.ai Artifact cannot host this:
+the artifact CSP blocks external fetches (no network capability on this
+account), so live prices are unreachable from an artifact page.
 
 ## Known issues / expectations
 

@@ -129,7 +129,10 @@ FEE_RATE = 0.001               # 0.1% per side
 
 # --- Languages -------------------------------------------------------------
 
-SUPPORTED_LANGUAGES = ("en", "hy", "ru", "es")
+# Russian was removed at the user's request and replaced with Ukrainian;
+# Greek was added alongside. The dashboard's I18N dictionaries must cover
+# exactly this set, in full key parity.
+SUPPORTED_LANGUAGES = ("en", "hy", "uk", "es", "el")
 
 # --- Retention -------------------------------------------------------------
 
