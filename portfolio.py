@@ -268,6 +268,58 @@ def record_equity(user_id: int, ts: int, prices: dict[str, float]) -> None:
              s["total"], s["realized_pnl"], s["fees_paid"]))
 
 
+def record_equity_all(ts: int, prices: dict[str, float]) -> int:
+    """Append one equity point for every portfolio, in a single pass.
+
+    Called once per engine cycle. Doing it with a snapshot() per user would run
+    several queries each and scale badly with player count, so holdings and
+    realised totals are fetched in bulk and joined in memory. Returns how many
+    rows were written.
+    """
+    accts = userstore.query("SELECT user_id, cash FROM portfolios")
+    if not accts:
+        return 0
+
+    by_user: dict[int, list[dict[str, Any]]] = {}
+    for h in userstore.query(
+            "SELECT user_id, symbol, qty, avg_cost FROM holdings WHERE qty > 0"):
+        by_user.setdefault(h["user_id"], []).append(h)
+
+    totals = {
+        r["user_id"]: r for r in userstore.query(
+            "SELECT user_id, "
+            "       COALESCE(SUM(fee), 0) AS fees, "
+            "       COALESCE(SUM(CASE WHEN side='SELL' THEN pnl END), 0) AS realized "
+            "FROM user_trades GROUP BY user_id")
+    }
+
+    rows = []
+    for a in accts:
+        uid = a["user_id"]
+        invested = market_value = 0.0
+        for h in by_user.get(uid, []):
+            cost = h["qty"] * h["avg_cost"]
+            price = prices.get(h["symbol"])
+            invested += cost
+            market_value += h["qty"] * price if price else cost
+        cash_ = float(a["cash"])
+        t = totals.get(uid, {})
+        rows.append((uid, ts, cash_, invested, market_value,
+                     cash_ + market_value,
+                     t.get("realized") or 0.0, t.get("fees") or 0.0))
+
+    with userstore.tx() as cur:
+        stmt = userstore.DIALECT.convert(
+            "INSERT INTO user_equity (user_id, ts, cash, invested, market_value, "
+            "total, realized, fees) VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT (user_id, ts) DO UPDATE SET "
+            "cash = excluded.cash, invested = excluded.invested, "
+            "market_value = excluded.market_value, total = excluded.total, "
+            "realized = excluded.realized, fees = excluded.fees")
+        cur.executemany(stmt, rows)
+    return len(rows)
+
+
 def equity_series(user_id: int, since: int | None, max_points: int = 360) -> list[dict[str, Any]]:
     """Equity rows since `since`, downsampled by keeping the last row per time
     bucket. Last-in-bucket is right for a value curve; averaging would smooth
