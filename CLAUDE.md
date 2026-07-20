@@ -210,3 +210,10 @@ account), so live prices are unreachable from an artifact page.
 - `snapshots` grows ~21.6k rows/day at the 60s cycle; pruned at 90 days.
 - Equity history accumulates only while the server runs — gaps in the
   portfolio charts mean the process was down, not a bug.
+- **CoinGecko 429s on the Render deployment** even though the same call
+  succeeds from a home IP. Render's free tier egresses through shared
+  addresses that CoinGecko rate-limits on reputation, so lowering our own
+  cadence does not fix it. Prices are unaffected (Binance/Hyperliquid carry
+  them) but `mcap`/`rank` stay `None`, so the Structure axis scores on volume
+  trend and spread alone. The fix is a free CoinGecko demo API key passed as
+  an env var, not a cadence change.
