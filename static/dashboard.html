@@ -493,6 +493,17 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
 .legend { display:flex; gap:14px; flex-wrap:wrap; font-size:11px; color:var(--text-secondary); }
 .legend span { display:flex; align-items:center; gap:5px; }
 
+.site-foot {
+  margin-top:28px; padding:18px 2px 4px; border-top:1px solid var(--border);
+  display:flex; align-items:center; justify-content:center; gap:5px;
+  flex-wrap:wrap; text-align:center;
+  font-size:11px; color:var(--text-muted);
+}
+.site-foot a { color:var(--text-secondary); text-decoration:none;
+  border-bottom:1px solid var(--border-bright); transition:color .15s; }
+.site-foot a:hover { color:var(--accent); }
+.foot-sep { opacity:.5; }
+
 /* The brand (~305px) and the right-hand controls (~330px) leave too little
    room to centre the pill without them colliding, so below this width it goes
    back into the normal flow instead of being absolutely positioned. */
@@ -704,6 +715,18 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
       </div>
     </div></div>
   </section>
+
+  <!-- CoinGecko's free Demo tier requires visible attribution. Binance and
+       Hyperliquid are credited alongside it since they supply the prices. -->
+  <footer class="site-foot">
+    <span data-i18n="dataBy"></span>
+    <a href="https://www.coingecko.com" target="_blank" rel="noopener noreferrer">CoinGecko</a>,
+    <a href="https://www.binance.com" target="_blank" rel="noopener noreferrer">Binance</a>
+    <span data-i18n="and"></span>
+    <a href="https://hyperliquid.xyz" target="_blank" rel="noopener noreferrer">Hyperliquid</a>
+    <span class="foot-sep">·</span>
+    <span data-i18n="paperOnly"></span>
+  </footer>
 </main>
 </div>
 
@@ -729,6 +752,7 @@ en: {
   markets:"Markets", portfolio:"Portfolio",
   live:"Live", connecting:"Connecting…", waiting:"Waiting for the first update…",
   disconnected:"Disconnected · reconnecting…",
+  dataBy:"Market data by", and:"and", paperOnly:"Practice portfolio · not investment advice",
   cycle:"Cycle", updated:"Updated",
   marketAvg:"Market Average", topRated:"Top Rated", buySignals:"Buy Signals",
   advancing:"Advancing", rated:"rated", of:"of", onChg:"on 24h change", sellSignalsMeta:"{n} sell signals",
@@ -786,6 +810,7 @@ hy: {
   markets:"Շուկաներ", portfolio:"Պորտֆել",
   live:"Ուղիղ", connecting:"Միանում է…", waiting:"Սպասում ենք առաջին թարմացմանը…",
   disconnected:"Անջատված · վերամիանում…",
+  dataBy:"Շուկայի տվյալները՝", and:"և", paperOnly:"Փորձնական պորտֆել · ներդրումային խորհրդատվություն չէ",
   cycle:"Ցիկլ", updated:"Թարմացվել է",
   marketAvg:"Շուկայի միջինը", topRated:"Լավագույն գնահատականը", buySignals:"Գնման ազդանշաններ",
   advancing:"Աճող", rated:"գնահատված", of:"՝", onChg:"24ժ փոփոխությամբ", sellSignalsMeta:"{n} վաճառքի ազդանշան",
@@ -843,6 +868,7 @@ uk: {
   markets:"Ринки", portfolio:"Портфель",
   live:"Наживо", connecting:"З'єднання…", waiting:"Очікування першого оновлення…",
   disconnected:"Відключено · повторне з'єднання…",
+  dataBy:"Ринкові дані від", and:"та", paperOnly:"Тренувальний портфель · не є інвестиційною порадою",
   cycle:"Цикл", updated:"Оновлено",
   marketAvg:"Середнє по ринку", topRated:"Найвищий рейтинг", buySignals:"Сигнали на купівлю",
   advancing:"Зростають", rated:"оцінено", of:"з", onChg:"за зміною 24г", sellSignalsMeta:"{n} сигналів на продаж",
@@ -900,6 +926,7 @@ es: {
   markets:"Mercados", portfolio:"Cartera",
   live:"En vivo", connecting:"Conectando…", waiting:"Esperando la primera actualización…",
   disconnected:"Desconectado · reconectando…",
+  dataBy:"Datos de mercado de", and:"y", paperOnly:"Cartera de práctica · no es asesoramiento de inversión",
   cycle:"Ciclo", updated:"Actualizado",
   marketAvg:"Promedio del mercado", topRated:"Mejor calificado", buySignals:"Señales de compra",
   advancing:"En alza", rated:"calificados", of:"de", onChg:"por cambio en 24h", sellSignalsMeta:"{n} señales de venta",
@@ -957,6 +984,7 @@ el: {
   markets:"Αγορές", portfolio:"Χαρτοφυλάκιο",
   live:"Ζωντανά", connecting:"Σύνδεση…", waiting:"Αναμονή πρώτης ενημέρωσης…",
   disconnected:"Αποσυνδέθηκε · επανασύνδεση…",
+  dataBy:"Δεδομένα αγοράς από", and:"και", paperOnly:"Χαρτοφυλάκιο εξάσκησης · δεν αποτελεί επενδυτική συμβουλή",
   cycle:"Κύκλος", updated:"Ενημερώθηκε",
   marketAvg:"Μέσος όρος αγοράς", topRated:"Κορυφαία βαθμολογία", buySignals:"Σήματα αγοράς",
   advancing:"Ανοδικά", rated:"βαθμολογημένα", of:"από", onChg:"στη μεταβολή 24ω", sellSignalsMeta:"{n} σήματα πώλησης",
