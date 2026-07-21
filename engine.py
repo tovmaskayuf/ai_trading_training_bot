@@ -257,6 +257,21 @@ async def run_cycle(cycle: int) -> None:
         log.exception("equity recording failed")
         errors.append(f"Equity history: {e}")
 
+    # --- Housekeeping ------------------------------------------------------
+    # Hourly, and never on cycle 0: a cold start should serve the dashboard as
+    # soon as it can rather than opening with a sweep of bulk deletes.
+    if cycle and cycle % config.MAINTENANCE_EVERY == 0:
+        try:
+            done = userstore.maintenance()
+            if any(done.values()):
+                log.info("maintenance: %s",
+                         ", ".join(f"{k}={v}" for k, v in done.items() if v))
+        except Exception as e:
+            # Housekeeping must never take a cycle down: falling behind on
+            # pruning degrades slowly, a dead engine stops everything at once.
+            log.exception("maintenance pass failed")
+            errors.append(f"Maintenance: {e}")
+
     # --- Publish -----------------------------------------------------------
     STATE.update({
         "cycle": cycle,

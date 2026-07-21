@@ -147,7 +147,19 @@ CREATE TABLE IF NOT EXISTS user_equity (
 # --- Connection ------------------------------------------------------------
 
 _conn: Any = None
-_lock = threading.Lock()
+
+# Re-entrant, and it guards statement execution as well as connect().
+#
+# There is one process-wide connection, and commit/rollback act on the whole
+# connection rather than on a cursor: two threads interleaving inside tx()
+# would let one thread's rollback discard another's uncommitted statements.
+# That was harmless while every route was `async def` on a single event loop --
+# nothing interleaved -- but the DB-touching routes are plain `def` now and
+# FastAPI runs those in a threadpool, so the overlap is real.
+#
+# Re-entrant because the read-then-write helpers (portfolio.buy, admin.delete)
+# query before opening their transaction, and tx() itself calls connect().
+_lock = threading.RLock()
 
 
 def connect() -> Any:
@@ -201,8 +213,14 @@ _ADDED_COLUMNS: list[tuple[str, str, str]] = [
 
 def _existing_columns(cur: Any, table: str) -> set[str]:
     if IS_POSTGRES:
+        # Scoped to the schema we actually write to. information_schema spans
+        # every schema on the database, so an unrelated `users` table elsewhere
+        # would report our columns as already present, the ALTER would be
+        # skipped, and the failure would surface later as every admin query
+        # erroring on a column that was never added.
         cur.execute("SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = %s", (table,))
+                    "WHERE table_name = %s AND table_schema = current_schema()",
+                    (table,))
         return {r[0] for r in cur.fetchall()}
     cur.execute(f"PRAGMA table_info({table})")
     return {r[1] for r in cur.fetchall()}
@@ -236,15 +254,16 @@ def backend() -> str:
 @contextmanager
 def tx() -> Iterator[Any]:
     conn = connect()
-    cur = conn.cursor()
-    try:
-        yield cur
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.close()
+    with _lock:
+        cur = conn.cursor()
+        try:
+            yield cur
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
 
 
 def _rows_to_dicts(cur: Any) -> list[dict[str, Any]]:
@@ -256,12 +275,13 @@ def _rows_to_dicts(cur: Any) -> list[dict[str, Any]]:
 
 def query(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
     conn = connect()
-    cur = conn.cursor()
-    try:
-        cur.execute(DIALECT.convert(sql), params)
-        return _rows_to_dicts(cur)
-    finally:
-        cur.close()
+    with _lock:
+        cur = conn.cursor()
+        try:
+            cur.execute(DIALECT.convert(sql), params)
+            return _rows_to_dicts(cur)
+        finally:
+            cur.close()
 
 
 def query_one(sql: str, params: tuple = ()) -> dict[str, Any] | None:
@@ -297,12 +317,19 @@ def new_session(user_id: int) -> str:
     return token
 
 
+# At most one activity write per user per hour. This sits on the read path of
+# every single request, so an unconditional UPDATE would double the write load
+# of the whole app to record a field only the admin console and the guest purge
+# ever read -- an hour is far finer than either needs.
+TOUCH_INTERVAL_MS = 3_600_000
+
+
 def user_for_session(token: str | None) -> dict[str, Any] | None:
     if not token:
         return None
     row = query_one(
         "SELECT u.id, u.username, u.display_name, u.is_guest, u.is_admin, "
-        "       u.is_blocked, u.created_ts "
+        "       u.is_blocked, u.last_seen_ts, u.created_ts "
         "FROM sessions s JOIN users u ON u.id = s.user_id "
         "WHERE s.token = ? AND s.expires_ts > ?",
         (token, now_ms()),
@@ -311,7 +338,23 @@ def user_for_session(token: str | None) -> dict[str, Any] | None:
         # SQLite stores these as 0/1; normalise so callers can trust the type.
         for f in ("is_guest", "is_admin", "is_blocked"):
             row[f] = bool(row[f])
+        _touch(row)
     return row
+
+
+def _touch(row: dict[str, Any]) -> None:
+    """Record that this user is active, throttled to TOUCH_INTERVAL_MS.
+
+    Without this `last_seen_ts` stays NULL forever, and the guest purge has to
+    fall back to created_ts -- which would evict someone who has been playing
+    daily for a fortnight purely because their account is old.
+    """
+    ts = now_ms()
+    last = row.get("last_seen_ts")
+    if last is not None and ts - last < TOUCH_INTERVAL_MS:
+        return
+    execute("UPDATE users SET last_seen_ts = ? WHERE id = ?", (ts, row["id"]))
+    row["last_seen_ts"] = ts
 
 
 def end_session(token: str | None) -> None:
@@ -319,5 +362,87 @@ def end_session(token: str | None) -> None:
         execute("DELETE FROM sessions WHERE token = ?", (token,))
 
 
-def purge_expired_sessions() -> None:
-    execute("DELETE FROM sessions WHERE expires_ts <= ?", (now_ms(),))
+def purge_expired_sessions() -> int:
+    """Drop sessions past their expiry. Returns how many went.
+
+    user_for_session already filters on expires_ts, so a stale row is never
+    honoured -- but nothing deleted them either, and at a 90-day lifetime the
+    table only ever grew.
+    """
+    with tx() as cur:
+        cur.execute(DIALECT.convert("DELETE FROM sessions WHERE expires_ts <= ?"),
+                    (now_ms(),))
+        return cur.rowcount or 0
+
+
+# --- Maintenance -----------------------------------------------------------
+
+
+# Child tables keyed by user_id. Ordered so rows never outlive their user; no
+# backend here declares foreign keys, so nothing cascades on its own.
+_USER_TABLES = ("user_equity", "user_trades", "holdings", "portfolios", "sessions")
+
+
+def purge_stale_guests(ttl_days: int = 0) -> int:
+    """Delete guest accounts that were abandoned without ever being used.
+
+    A guest row is created for *every* cookie-less request, so crawlers, uptime
+    checks and one-off page loads each leave one behind permanently. Each was
+    then charged an equity row every cycle for the lifetime of the deployment.
+
+    Only guests that never traded and hold nothing are eligible: anyone who
+    actually played keeps their portfolio until they claim an account, and a
+    registered account is never touched regardless of age.
+    """
+    ttl_days = ttl_days or config.GUEST_TTL_DAYS
+    cutoff = now_ms() - ttl_days * 86_400_000
+
+    victims = [r["id"] for r in query(
+        "SELECT u.id FROM users u "
+        "WHERE u.is_guest = 1 "
+        # NULL last_seen_ts means they predate activity tracking; fall back to
+        # creation so those still age out instead of living forever.
+        "  AND COALESCE(u.last_seen_ts, u.created_ts) < ? "
+        "  AND NOT EXISTS (SELECT 1 FROM user_trades t WHERE t.user_id = u.id) "
+        "  AND NOT EXISTS (SELECT 1 FROM holdings h WHERE h.user_id = u.id AND h.qty > 0)",
+        (cutoff,))]
+    if not victims:
+        return 0
+
+    with tx() as cur:
+        c = DIALECT.convert
+        # Chunked: some drivers cap how many placeholders one statement takes,
+        # and a long-idle deployment can accumulate a lot of these at once.
+        for i in range(0, len(victims), 500):
+            batch = victims[i:i + 500]
+            marks = ",".join("?" * len(batch))
+            for table in _USER_TABLES:
+                cur.execute(c(f"DELETE FROM {table} WHERE user_id IN ({marks})"),
+                            tuple(batch))
+            cur.execute(c(f"DELETE FROM users WHERE id IN ({marks})"), tuple(batch))
+
+    log.info("purged %d abandoned guest accounts", len(victims))
+    return len(victims)
+
+
+def prune_equity(retention_days: int = 0) -> int:
+    """Trim equity history past the retention window.
+
+    The market-data store prunes itself, but this table lives in Postgres and
+    was never trimmed at all -- one row per portfolio per cycle, on a free plan
+    with a 1 GB ceiling holding the only copy of every account.
+    """
+    retention_days = retention_days or config.EQUITY_RETENTION_DAYS
+    cutoff = now_ms() - retention_days * 86_400_000
+    with tx() as cur:
+        cur.execute(DIALECT.convert("DELETE FROM user_equity WHERE ts < ?"), (cutoff,))
+        return cur.rowcount or 0
+
+
+def maintenance() -> dict[str, int]:
+    """One housekeeping pass over the durable store. Safe to call at any time."""
+    return {
+        "guests_purged": purge_stale_guests(),
+        "sessions_purged": purge_expired_sessions(),
+        "equity_pruned": prune_equity(),
+    }

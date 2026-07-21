@@ -3,6 +3,22 @@
 Runs the polling engine as a background task inside the same process, so a
 single `uvicorn server:app` gives you both the always-on data engine and the
 web interface.
+
+**Route handlers that touch a database are plain `def`, not `async def`, and
+that is deliberate.** sqlite3 and psycopg are blocking libraries. A blocking
+call inside `async def` runs directly on the event loop and stalls everything
+sharing it -- the engine cycle, every open SSE stream, and every other request
+-- for its full duration. FastAPI runs a plain `def` handler in a threadpool
+instead, so the loop stays free.
+
+This is invisible in local development and severe in production, which is what
+made it worth writing down: locally DATABASE_URL is unset, so the store is
+SQLite on a local disk and a portfolio snapshot costs ~0.04ms. The same code on
+Render makes four sequential round-trips to a Postgres in another datacentre.
+Identical source, two orders of magnitude apart, and only the deployed one
+blocks the engine.
+
+`lifespan` and `stream` genuinely await and stay coroutines.
 """
 
 from __future__ import annotations
@@ -123,8 +139,9 @@ def require_user(request: Request, response: Response) -> dict[str, Any]:
     """
     user = current_user(request)
     if user:
-        # A block takes effect immediately, not at next login: their sessions
-        # are dropped when blocked, but one could still be in flight.
+        # Blocking deliberately leaves sessions intact (see admin.set_blocked),
+        # so the block surfaces here as an explicit 403 the user can read rather
+        # than silently demoting them to a fresh guest account.
         if user.get("is_blocked"):
             raise HTTPException(
                 403, "This account has been blocked. "
@@ -159,7 +176,7 @@ def _range_cutoff(range_key: str) -> int | None:
 
 
 @app.get("/api/settings")
-async def get_settings() -> dict[str, Any]:
+def get_settings() -> dict[str, Any]:
     return {
         **settings.get(),
         "all_assets": [
@@ -173,7 +190,7 @@ async def get_settings() -> dict[str, Any]:
 
 
 @app.post("/api/settings")
-async def save_settings(payload: dict[str, Any], request: Request,
+def save_settings(payload: dict[str, Any], request: Request,
                         response: Response) -> dict[str, Any]:
     """Apply start-screen choices. Changing the starting capital resets the
     caller's own portfolio to the new amount; language and asset selection
@@ -199,7 +216,7 @@ async def save_settings(payload: dict[str, Any], request: Request,
 
 
 @app.get("/api/overview")
-async def overview(request: Request, response: Response) -> dict[str, Any]:
+def overview(request: Request, response: Response) -> dict[str, Any]:
     """Everything the main screen needs in one call."""
     user = require_user(request, response)
     held_now = {h["symbol"] for h in pf.holdings(user["id"])}
@@ -260,7 +277,7 @@ async def overview(request: Request, response: Response) -> dict[str, Any]:
 
 
 @app.get("/api/asset/{symbol}")
-async def asset_detail(symbol: str, request: Request,
+def asset_detail(symbol: str, request: Request,
                        response: Response) -> dict[str, Any]:
     symbol = symbol.upper()
     if symbol not in config.BY_SYMBOL:
@@ -282,7 +299,7 @@ async def asset_detail(symbol: str, request: Request,
 
 
 @app.get("/api/asset/{symbol}/prices")
-async def asset_prices(symbol: str, range: str = "24h") -> dict[str, Any]:
+def asset_prices(symbol: str, range: str = "24h") -> dict[str, Any]:
     """Price series for the drawer chart, resolution matched to the range:
     per-minute snapshots for 1H, hourly candles up to a week, daily beyond."""
     symbol = symbol.upper()
@@ -331,7 +348,7 @@ async def asset_prices(symbol: str, range: str = "24h") -> dict[str, Any]:
 
 
 @app.get("/api/asset/{symbol}/ratings")
-async def asset_ratings(symbol: str, range: str = "24h") -> dict[str, Any]:
+def asset_ratings(symbol: str, range: str = "24h") -> dict[str, Any]:
     """Composite-score history, downsampled to chart resolution. Ratings are
     retained for 90 days, so year-scale ranges show what exists."""
     symbol = symbol.upper()
@@ -373,7 +390,7 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.get("/api/me")
-async def me(request: Request, response: Response) -> dict[str, Any]:
+def me(request: Request, response: Response) -> dict[str, Any]:
     """Identity only. Unlike every other endpoint this does not 403 a blocked
     account -- the client needs to be able to read its own state in order to
     explain the block, rather than just failing silently."""
@@ -387,7 +404,7 @@ async def me(request: Request, response: Response) -> dict[str, Any]:
 
 
 @app.post("/api/auth/signup")
-async def signup(payload: dict[str, Any], request: Request,
+def signup(payload: dict[str, Any], request: Request,
                  response: Response) -> dict[str, Any]:
     """Create an account. A guest keeps the portfolio it already built."""
     username = str(payload.get("username", ""))
@@ -415,7 +432,7 @@ async def signup(payload: dict[str, Any], request: Request,
 
 
 @app.post("/api/auth/login")
-async def login(payload: dict[str, Any], request: Request,
+def login(payload: dict[str, Any], request: Request,
                 response: Response) -> dict[str, Any]:
     try:
         user = accounts.authenticate(
@@ -433,14 +450,14 @@ async def login(payload: dict[str, Any], request: Request,
 
 
 @app.post("/api/auth/logout")
-async def logout(request: Request, response: Response) -> dict[str, Any]:
+def logout(request: Request, response: Response) -> dict[str, Any]:
     userstore.end_session(request.cookies.get(SESSION_COOKIE))
     response.delete_cookie(SESSION_COOKIE, path="/")
     return {"ok": True}
 
 
 @app.get("/api/leaderboard")
-async def leaderboard(request: Request, response: Response,
+def leaderboard(request: Request, response: Response,
                       limit: int = 100) -> dict[str, Any]:
     """Global standings. Everyone is marked to the same prices at read time."""
     user = require_user(request, response)
@@ -463,7 +480,7 @@ async def leaderboard(request: Request, response: Response,
 
 
 @app.get("/api/admin/players")
-async def admin_players(request: Request, response: Response) -> dict[str, Any]:
+def admin_players(request: Request, response: Response) -> dict[str, Any]:
     admin_user = require_admin(request, response)
     prices = _current_prices()
     return {
@@ -474,7 +491,7 @@ async def admin_players(request: Request, response: Response) -> dict[str, Any]:
 
 
 @app.get("/api/admin/player/{user_id}")
-async def admin_player(user_id: int, request: Request,
+def admin_player(user_id: int, request: Request,
                        response: Response) -> dict[str, Any]:
     require_admin(request, response)
     try:
@@ -484,7 +501,7 @@ async def admin_player(user_id: int, request: Request,
 
 
 @app.post("/api/admin/player/{user_id}/block")
-async def admin_block(user_id: int, payload: dict[str, Any], request: Request,
+def admin_block(user_id: int, payload: dict[str, Any], request: Request,
                       response: Response) -> dict[str, Any]:
     require_admin(request, response)
     try:
@@ -494,7 +511,7 @@ async def admin_block(user_id: int, payload: dict[str, Any], request: Request,
 
 
 @app.post("/api/admin/player/{user_id}/delete")
-async def admin_delete(user_id: int, request: Request,
+def admin_delete(user_id: int, request: Request,
                        response: Response) -> dict[str, Any]:
     """Delete a player and release their username for reuse."""
     require_admin(request, response)
@@ -505,7 +522,7 @@ async def admin_delete(user_id: int, request: Request,
 
 
 @app.post("/api/admin/player/{user_id}/password")
-async def admin_reset_password(user_id: int, payload: dict[str, Any],
+def admin_reset_password(user_id: int, payload: dict[str, Any],
                                request: Request,
                                response: Response) -> dict[str, Any]:
     require_admin(request, response)
@@ -519,7 +536,7 @@ async def admin_reset_password(user_id: int, payload: dict[str, Any],
 
 
 @app.get("/api/manual")
-async def manual_view(request: Request, response: Response) -> dict[str, Any]:
+def manual_view(request: Request, response: Response) -> dict[str, Any]:
     """The caller's own portfolio, marked to the latest prices."""
     user = require_user(request, response)
     return {**pf.snapshot(user["id"], _current_prices()),
@@ -527,7 +544,7 @@ async def manual_view(request: Request, response: Response) -> dict[str, Any]:
 
 
 @app.get("/api/manual/history")
-async def manual_history(request: Request, response: Response,
+def manual_history(request: Request, response: Response,
                          range: str = "24h") -> dict[str, Any]:
     """Portfolio value over time. Returns every metric column; the client
     chooses which one to chart."""
@@ -537,7 +554,7 @@ async def manual_history(request: Request, response: Response,
 
 
 @app.post("/api/manual/trade")
-async def manual_trade(payload: dict[str, Any], request: Request,
+def manual_trade(payload: dict[str, Any], request: Request,
                        response: Response) -> dict[str, Any]:
     """Execute a simulated buy or sell at the current live price.
 
@@ -599,7 +616,7 @@ def _opt_float(payload: dict[str, Any], key: str) -> float | None:
 
 
 @app.post("/api/manual/reset")
-async def manual_reset(request: Request, response: Response) -> dict[str, Any]:
+def manual_reset(request: Request, response: Response) -> dict[str, Any]:
     """Reset only the caller's own portfolio.
 
     This used to reset the single shared portfolio for everyone, with no
@@ -614,7 +631,7 @@ async def manual_reset(request: Request, response: Response) -> dict[str, Any]:
 
 
 @app.post("/api/weights")
-async def rescore(payload: dict[str, float]) -> dict[str, Any]:
+def rescore(payload: dict[str, float]) -> dict[str, Any]:
     """Recompute composites under caller-supplied axis weights.
 
     The dashboard does this client-side for instant feedback; this endpoint
@@ -673,7 +690,7 @@ async def stream(request: Request) -> StreamingResponse:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
+def health() -> dict[str, Any]:
     return {
         "running": engine.STATE.get("running", False),
         "cycle": engine.STATE.get("cycle", 0),

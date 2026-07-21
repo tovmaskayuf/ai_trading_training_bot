@@ -137,3 +137,25 @@ SUPPORTED_LANGUAGES = ("en", "hy", "uk", "es", "el")
 # --- Retention -------------------------------------------------------------
 
 RETENTION_DAYS = 90
+
+# Retention for the *durable* store. db.RETENTION_DAYS above covers market data
+# on the ephemeral disk, which is regenerable and costs nothing to lose; these
+# cover Postgres, which on the free plan has a hard 1 GB ceiling and holds the
+# only copy of every account.
+#
+# user_equity is the fastest-growing table anywhere in the project: one row per
+# portfolio per cycle, so 1,440 rows per portfolio per day. Nothing trimmed it
+# before, which meant the one table that cannot be regenerated was also the one
+# with no bound on its size.
+EQUITY_RETENTION_DAYS = 90
+
+# Every cookie-less request mints a guest row so a first-time visitor can trade
+# before signing up -- including requests from crawlers, uptime probes and
+# anyone who opened the page once. Guests that never traded are abandoned page
+# loads, and each one used to cost an equity row every cycle forever.
+GUEST_TTL_DAYS = 7
+
+# How often the engine runs the maintenance pass, in cycles. Hourly at the
+# 60-second cadence: these are bulk deletes over indexed columns, and running
+# them per cycle would spend more time pruning than the rows cost to keep.
+MAINTENANCE_EVERY = 60

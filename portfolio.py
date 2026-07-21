@@ -275,8 +275,19 @@ def record_equity_all(ts: int, prices: dict[str, float]) -> int:
     several queries each and scale badly with player count, so holdings and
     realised totals are fetched in bulk and joined in memory. Returns how many
     rows were written.
+
+    Portfolios that hold nothing and have never traded are skipped. Their curve
+    is flat at the starting balance and `_seed_portfolio` already recorded that
+    point, so a row per cycle would restate a constant. This matters because a
+    guest row is created for every cookie-less visitor: without the filter,
+    every abandoned page load bought itself 1,440 identical rows a day, for as
+    long as the deployment lived.
     """
-    accts = userstore.query("SELECT user_id, cash FROM portfolios")
+    accts = userstore.query(
+        "SELECT p.user_id, p.cash FROM portfolios p "
+        "WHERE EXISTS (SELECT 1 FROM holdings h "
+        "              WHERE h.user_id = p.user_id AND h.qty > 0) "
+        "   OR EXISTS (SELECT 1 FROM user_trades t WHERE t.user_id = p.user_id)")
     if not accts:
         return 0
 
@@ -327,7 +338,12 @@ def equity_series(user_id: int, since: int | None, max_points: int = 360) -> lis
     if since is None:
         first = userstore.query_one(
             "SELECT MIN(ts) AS t FROM user_equity WHERE user_id = ?", (user_id,))
-        since = (first or {}).get("t") or 0
+        since = (first or {}).get("t")
+        if since is None:
+            # No history at all. Falling through with since = 0 would size the
+            # bucket off the whole epoch -- ~57 days per bucket -- which is
+            # nonsense for the next caller that does have rows in range.
+            return []
     span = max(now_ms() - since, 1)
     bucket = max(60_000, span // max_points)
     return userstore.query(

@@ -7,6 +7,7 @@ All timestamps are epoch milliseconds (UTC) to match the upstream APIs.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from typing import Any, Iterator
@@ -107,31 +108,44 @@ def now_ms() -> int:
 
 _conn: sqlite3.Connection | None = None
 
+# Guards tx(). commit() and rollback() act on the connection, not on a single
+# statement, so two threads inside tx() at once would let one thread's rollback
+# throw away the other's uncommitted writes. The read routes are plain `def`
+# now, which means FastAPI runs them in a threadpool alongside the engine.
+# Re-entrant so a writer that reads first cannot deadlock against itself.
+_lock = threading.RLock()
+
 
 def connect() -> sqlite3.Connection:
     """Return the process-wide connection, creating the schema on first call."""
     global _conn
     if _conn is None:
-        config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.execute("PRAGMA synchronous=NORMAL")
-        _conn.executescript(SCHEMA)
-        _conn.executescript(MIGRATIONS)
-        _conn.commit()
+        with _lock:
+            if _conn is None:
+                config.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.executescript(SCHEMA)
+                conn.executescript(MIGRATIONS)
+                conn.commit()
+                # Published only once it is fully migrated: another thread
+                # reading _conn must never see a half-built schema.
+                _conn = conn
     return _conn
 
 
 @contextmanager
 def tx() -> Iterator[sqlite3.Connection]:
     conn = connect()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+    with _lock:
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def query(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
