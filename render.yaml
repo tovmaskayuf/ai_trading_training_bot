@@ -40,6 +40,15 @@ services:
         fromDatabase:
           name: tt-trading-db
           property: connectionString
+      # Administrator credential. sync:false means Render prompts for it and
+      # it is never written to this file -- the repository is public, and a
+      # committed admin password would be readable by anyone. With this unset
+      # no admin account is created at all, rather than one with a guessable
+      # password. Re-applied on every boot, so changing it here rotates it.
+      - key: MASTER_PASSWORD
+        sync: false
+      - key: MASTER_USERNAME
+        value: master
 
 databases:
   # Free Postgres EXPIRES 30 DAYS after creation, then is deleted after a

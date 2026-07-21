@@ -82,6 +82,10 @@ CREATE TABLE IF NOT EXISTS users (
     display_name  TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     is_guest      INTEGER NOT NULL DEFAULT 0,
+    is_admin      INTEGER NOT NULL DEFAULT 0,
+    is_blocked    INTEGER NOT NULL DEFAULT 0,
+    blocked_ts    {d.big_int},
+    last_seen_ts  {d.big_int},
     created_ts    {d.big_int} NOT NULL
 );
 
@@ -184,12 +188,45 @@ def _split_statements(sql: str) -> list[str]:
     return [s.strip() for s in stripped.split(";") if s.strip()]
 
 
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS silently
+# does nothing on an existing table, so new columns need an explicit migration
+# or a live database keeps the old shape and every query naming them fails.
+_ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "is_blocked", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "blocked_ts", "BIGINT"),
+    ("users", "last_seen_ts", "BIGINT"),
+]
+
+
+def _existing_columns(cur: Any, table: str) -> set[str]:
+    if IS_POSTGRES:
+        cur.execute("SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = %s", (table,))
+        return {r[0] for r in cur.fetchall()}
+    cur.execute(f"PRAGMA table_info({table})")
+    return {r[1] for r in cur.fetchall()}
+
+
+def _migrate(conn: Any) -> None:
+    cur = conn.cursor()
+    try:
+        for table, column, decl in _ADDED_COLUMNS:
+            if column not in _existing_columns(cur, table):
+                log.info("userstore: adding %s.%s", table, column)
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        conn.commit()
+    finally:
+        cur.close()
+
+
 def _init_schema(conn: Any) -> None:
     cur = conn.cursor()
     for stmt in _split_statements(_schema()):
         cur.execute(stmt)
     conn.commit()
     cur.close()
+    _migrate(conn)
 
 
 def backend() -> str:
@@ -264,14 +301,16 @@ def user_for_session(token: str | None) -> dict[str, Any] | None:
     if not token:
         return None
     row = query_one(
-        "SELECT u.id, u.username, u.display_name, u.is_guest, u.created_ts "
+        "SELECT u.id, u.username, u.display_name, u.is_guest, u.is_admin, "
+        "       u.is_blocked, u.created_ts "
         "FROM sessions s JOIN users u ON u.id = s.user_id "
         "WHERE s.token = ? AND s.expires_ts > ?",
         (token, now_ms()),
     )
     if row:
-        # SQLite stores this as 0/1; normalise so callers can trust the type.
-        row["is_guest"] = bool(row["is_guest"])
+        # SQLite stores these as 0/1; normalise so callers can trust the type.
+        for f in ("is_guest", "is_admin", "is_blocked"):
+            row[f] = bool(row[f])
     return row
 
 

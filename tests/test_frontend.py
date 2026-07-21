@@ -94,10 +94,24 @@ def main() -> None:
                           not missing and not extra,
                           f"missing={sorted(missing)} extra={sorted(extra)}")
 
-                # Every data-i18n attribute must resolve.
+                # Every i18n attribute must resolve, including placeholders.
                 used = set(re.findall(r'data-i18n="([^"]+)"', html))
                 undef = sorted(used - base)
                 check("every data-i18n key is defined", not undef, f"undefined={undef}")
+
+                ph = set(re.findall(r'data-i18n-ph="([^"]+)"', html))
+                undef_ph = sorted(ph - base)
+                check("every data-i18n-ph key is defined", not undef_ph,
+                      f"undefined={undef_ph}")
+
+                # t('key') literals in the script must resolve too. Dynamic
+                # prefixes like t('sig' + signal) are excluded by name.
+                DYNAMIC = {"sig"}
+                lit = set(re.findall(
+                    r"(?<![A-Za-z0-9_$])t\(\s*'([A-Za-z_][A-Za-z0-9_]*)'", html))
+                undef_lit = sorted(lit - base - DYNAMIC)
+                check("every t('key') literal is defined", not undef_lit,
+                      f"undefined={undef_lit}")
 
     # --- Structure --------------------------------------------------------
     # Comments discuss these tags by name, so count only real markup.

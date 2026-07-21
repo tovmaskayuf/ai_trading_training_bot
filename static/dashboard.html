@@ -265,10 +265,11 @@ header {
 .brand .bt { font-size:14.5px; font-weight:700; letter-spacing:-.02em; white-space:nowrap; }
 .brand .bt .by { color:var(--accent); }
 .brand .bs { font-size:11px; color:var(--text-muted); font-family:var(--mono); }
-/* Absolutely centred so the pill sits at the true middle of the bar rather
-   than at the midpoint of whatever space the side clusters happen to leave. */
+/* Sits between the brand and the view tabs, centred in the gap by a flex
+   spacer on each side. Not centred on the viewport: the right-hand cluster is
+   wider than the brand, so a true centre would leave it visibly closer to the
+   tabs than to the logo. */
 .status {
-  position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
   display:flex; align-items:center; gap:7px; white-space:nowrap;
   font-size:12px; color:var(--text-secondary);
 }
@@ -575,6 +576,48 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
 .lb-num { font-family:var(--mono); text-align:right; }
 .lb-empty { padding:30px 14px; text-align:center; color:var(--text-secondary); font-size:13px; }
 
+/* ── Master console ────────────────────────────────────────────────────── */
+.admin-search {
+  background:var(--surface-1); border:1px solid var(--border); color:var(--text-primary);
+  border-radius:999px; padding:6px 13px; font-size:12.5px; font-family:inherit;
+  outline:none; min-width:190px;
+}
+.admin-search:focus { border-color:var(--accent); }
+.ad-row {
+  display:grid; grid-template-columns:1fr 108px 88px 66px 210px;
+  gap:12px; align-items:center; padding:11px 14px;
+  border-bottom:1px solid var(--border); font-size:13px;
+}
+.ad-row.head { color:var(--text-muted); font-size:11px; text-transform:uppercase;
+  letter-spacing:.05em; border-bottom-color:var(--border-bright); }
+.ad-row.blocked { opacity:.55; }
+.ad-row.self { background:color-mix(in srgb, var(--accent) 10%, transparent); }
+.ad-who { min-width:0; }
+.ad-name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ad-sub { font-size:11px; color:var(--text-muted); font-family:var(--mono); }
+.ad-num { font-family:var(--mono); text-align:right; }
+.ad-tag {
+  display:inline-block; font-size:10px; padding:1.5px 7px; border-radius:999px;
+  margin-left:6px; vertical-align:middle; letter-spacing:.03em;
+}
+.ad-tag.guest { background:var(--surface-2); color:var(--text-muted); }
+.ad-tag.admin { background:color-mix(in srgb,var(--accent) 22%,transparent); color:var(--accent); }
+.ad-tag.blocked { background:var(--critical-dim); color:var(--critical); }
+.ad-acts { display:flex; gap:6px; justify-content:flex-end; flex-wrap:wrap; }
+.ad-btn {
+  background:var(--surface-1); border:1px solid var(--border); color:var(--text-secondary);
+  padding:5px 10px; border-radius:8px; font-size:11.5px; cursor:pointer; font-family:inherit;
+}
+.ad-btn:hover:not(:disabled) { border-color:var(--border-bright); color:var(--text-primary); }
+.ad-btn:disabled { opacity:.35; cursor:not-allowed; }
+/* Block and delete are one control: a segmented pair, so the destructive half
+   is never a lone button that can be hit by reflex. */
+.ad-pair { display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+.ad-pair .ad-btn { border:0; border-radius:0; }
+.ad-pair .ad-btn + .ad-btn { border-left:1px solid var(--border); }
+.ad-pair .ad-btn.danger { color:var(--critical); }
+.ad-pair .ad-btn.danger:hover:not(:disabled) { background:var(--critical-dim); }
+
 .site-foot {
   margin-top:28px; padding:18px 2px 4px; border-top:1px solid var(--border);
   display:flex; align-items:center; justify-content:center; gap:5px;
@@ -590,7 +633,9 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
    room to centre the pill without them colliding, so below this width it goes
    back into the normal flow instead of being absolutely positioned. */
 @media (max-width:1000px) {
-  .status { position:static; transform:none; }
+  /* Not enough room to hold the gap open; let the spacers collapse so the
+     header wraps instead of squeezing the pill against the tabs. */
+  .header-gap { flex:0 0 0; }
 }
 
 @media (max-width:760px) {
@@ -721,12 +766,14 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
       <div class="bs" id="subtitle"></div>
     </div>
   </button>
+  <div class="spacer header-gap"></div>
   <div class="status"><span class="dot off" id="dot"></span><span id="statusText"></span></div>
-  <div class="spacer"></div>
+  <div class="spacer header-gap"></div>
   <div class="tabs">
     <button class="btn on" data-view="market" data-i18n="markets"></button>
     <button class="btn" data-view="portfolio" data-i18n="portfolio"></button>
     <button class="btn" data-view="leaders" data-i18n="leaderboard"></button>
+    <button class="btn hide" data-view="admin" id="adminTab" data-i18n="master"></button>
   </div>
   <button class="btn acct" id="acctBtn"><span id="acctName"></span></button>
   <select class="lang-sel" id="langSel" aria-label="Language"></select>
@@ -838,6 +885,21 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
     </div></div>
   </section>
 
+  <!-- Master / administrator console. Only rendered for an admin account;
+       the API returns 404 to everyone else regardless. -->
+  <section id="view-admin" class="hide">
+    <div class="tiles" id="adminStats"></div>
+    <div class="panel">
+      <div class="panel-head">
+        <h2 data-i18n="adminTitle"></h2>
+        <span class="hint" data-i18n="adminHint"></span>
+        <div class="spacer"></div>
+        <input class="admin-search" id="adminSearch" data-i18n-ph="adminSearch">
+      </div>
+      <div id="adminBody"></div>
+    </div>
+  </section>
+
   <!-- Leaderboard -->
   <section id="view-leaders" class="hide">
     <div class="panel">
@@ -882,6 +944,11 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
         <input id="authPass" name="password" type="password"
                autocomplete="current-password" required>
       </label>
+      <label class="fld hide" id="authConfirmRow">
+        <span data-i18n="confirmPassword"></span>
+        <input id="authConfirm" name="confirm" type="password"
+               autocomplete="new-password">
+      </label>
       <div class="auth-err" id="authErr"></div>
       <button class="submit buy" id="authGo" type="submit"></button>
     </form>
@@ -903,6 +970,8 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
 /* ══ Internationalization ═══════════════════════════════════════════════ */
 const I18N = {
 en: {
+  accountBlocked:"Your account has been blocked. Please contact the administrator.",
+  master:"Master", confirmPassword:"Confirm password", passwordMismatch:"The two passwords do not match.", adminTitle:"All players", adminHint:"Full access. Block, delete or reset any account.", adminSearch:"Search players…", adminActions:"Actions", adminView:"View", adminReset:"Reset password", adminBlock:"Block", adminUnblock:"Unblock", adminDelete:"Delete", adminNoMatch:"No players match that search.", adminDenied:"Administrator access is required.", adminAccounts:"Accounts", adminRegistered:"Registered", adminGuests:"Guests", adminBlocked:"Blocked", adminTrades:"Trades", adminStore:"Store", adminActive:"Active", adminStatus:"Status", adminSessions:"Active sessions", adminDisplayName:"Display name", adminResetPrompt:"Enter a new password for {name}:", adminResetDone:"Password reset for {name}.", adminBlockedDone:"{name} has been blocked.", adminUnblocked:"{name} has been unblocked.", adminDeleteConfirm:"Delete {name} permanently? Their portfolio and history are erased and the username becomes available again.", adminDeleted:"{name} deleted. The username is free again.", adminPwNote:"Stored as a one-way hash — it cannot be shown. Use Reset password.", guest:"Guest", guestNoLogin:"guest · no login", blocked:"Blocked", joined:"joined",
   leaderboard:"Leaderboard", leaderHint:"Ranked by total return", leaderEmpty:"No players yet — sign up to claim the top spot.", leaderGuest:"You are playing as a guest. Sign up to appear on the leaderboard.", leaderError:"Could not load the leaderboard.", rank:"Rank", player:"Player", value:"Value", returnPct:"Return", trades:"Trades", you:"you", playerCount:"{n} players", signUp:"Sign up", logIn:"Log in", logOut:"Log out", createAccount:"Create account", username:"Username", password:"Password", signUpSub:"Create an account to save your progress and join the leaderboard.", signUpKeeps:"Your current portfolio comes with you — nothing is lost.", logInSub:"Welcome back. Log in to pick up where you left off.", haveAccount:"Already have an account?", noAccount:"Need an account?", welcomeNew:"Welcome, {name}! You are on the leaderboard.", welcomeBack:"Welcome back, {name}.", loggedOut:"Logged out. You are playing as a guest.", confirmLogout:"Log out of {name}?",
   tagline:"Practice cryptocurrency trading with live market data and AI-powered ratings — zero risk, real skills.",
   langTitle:"Language", langHint:"Choose your interface language.",
@@ -962,6 +1031,8 @@ en: {
   errGeneric:"Something went wrong. Please try again.",
 },
 hy: {
+  accountBlocked:"Ձեր հաշիվն արգելափակված է։ Խնդրում ենք կապվել ադմինիստրատորի հետ։",
+  master:"Գլխավոր", confirmPassword:"Հաստատել գաղտնաբառը", passwordMismatch:"Գաղտնաբառերը չեն համընկնում։", adminTitle:"Բոլոր խաղացողները", adminHint:"Լիարժեք մուտք։ Արգելափակել, ջնջել կամ վերականգնել ցանկացած հաշիվ։", adminSearch:"Որոնել խաղացողներ…", adminActions:"Գործողություններ", adminView:"Դիտել", adminReset:"Վերականգնել գաղտնաբառը", adminBlock:"Արգելափակել", adminUnblock:"Ապաարգելափակել", adminDelete:"Ջնջել", adminNoMatch:"Համընկնող խաղացողներ չկան։", adminDenied:"Պահանջվում է ադմինիստրատորի մուտք։", adminAccounts:"Հաշիվներ", adminRegistered:"Գրանցված", adminGuests:"Հյուրեր", adminBlocked:"Արգելափակված", adminTrades:"Գործարքներ", adminStore:"Պահոց", adminActive:"Ակտիվ", adminStatus:"Կարգավիճակ", adminSessions:"Ակտիվ սեսիաներ", adminDisplayName:"Ցուցադրվող անուն", adminResetPrompt:"Մուտքագրեք նոր գաղտնաբառ {name}-ի համար՝", adminResetDone:"{name}-ի գաղտնաբառը վերականգնվեց։", adminBlockedDone:"{name}-ը արգելափակվեց։", adminUnblocked:"{name}-ը ապաարգելափակվեց։", adminDeleteConfirm:"Ջնջե՞լ {name}-ը ընդմիշտ։ Պորտֆելը և պատմությունը կջնջվեն, օգտանունը կազատվի։", adminDeleted:"{name}-ը ջնջվեց։ Օգտանունն ազատ է։", adminPwNote:"Պահվում է միակողմանի հեշով — հնարավոր չէ ցուցադրել։ Օգտագործեք վերականգնումը։", guest:"Հյուր", guestNoLogin:"հյուր · առանց մուտքի", blocked:"Արգելափակված", joined:"միացել է",
   leaderboard:"Առաջատարներ", leaderHint:"Դասավորված ըստ ընդհանուր եկամտի", leaderEmpty:"Դեռ խաղացողներ չկան — գրանցվեք և զբաղեցրեք առաջին տեղը։", leaderGuest:"Դուք խաղում եք որպես հյուր։ Գրանցվեք՝ ցուցակում հայտնվելու համար։", leaderError:"Չհաջողվեց բեռնել առաջատարների ցանկը։", rank:"Տեղ", player:"Խաղացող", value:"Արժեք", returnPct:"Եկամուտ", trades:"Գործարքներ", you:"դուք", playerCount:"{n} խաղացող", signUp:"Գրանցվել", logIn:"Մուտք", logOut:"Ելք", createAccount:"Ստեղծել հաշիվ", username:"Օգտանուն", password:"Գաղտնաբառ", signUpSub:"Ստեղծեք հաշիվ՝ առաջընթացը պահպանելու և ցուցակին միանալու համար։", signUpKeeps:"Ձեր ընթացիկ պորտֆելը մնում է ձեզ հետ — ոչինչ չի կորչում։", logInSub:"Բարի վերադարձ։ Մուտք գործեք՝ շարունակելու համար։", haveAccount:"Արդեն ունե՞ք հաշիվ։", noAccount:"Հաշիվ պե՞տք է։", welcomeNew:"Բարի գալուստ, {name}: Դուք ցուցակում եք։", welcomeBack:"Բարի վերադարձ, {name}։", loggedOut:"Դուրս եկաք։ Խաղում եք որպես հյուր։", confirmLogout:"Դուրս գա՞լ {name} հաշվից։",
   tagline:"Փորձեք կրիպտոարժույթների առևտուրը իրական շուկայական տվյալներով և AI գնահատականներով — զրո ռիսկ, իրական հմտություններ։",
   langTitle:"Լեզու", langHint:"Ընտրեք ինտերֆեյսի լեզուն։",
@@ -1021,6 +1092,8 @@ hy: {
   errGeneric:"Ինչ-որ բան սխալ գնաց։ Խնդրում ենք կրկին փորձել։",
 },
 uk: {
+  accountBlocked:"Ваш акаунт заблоковано. Зверніться до адміністратора.",
+  master:"Майстер", confirmPassword:"Підтвердьте пароль", passwordMismatch:"Паролі не збігаються.", adminTitle:"Усі гравці", adminHint:"Повний доступ. Блокуйте, видаляйте або скидайте будь-який акаунт.", adminSearch:"Пошук гравців…", adminActions:"Дії", adminView:"Переглянути", adminReset:"Скинути пароль", adminBlock:"Заблокувати", adminUnblock:"Розблокувати", adminDelete:"Видалити", adminNoMatch:"Немає гравців за цим запитом.", adminDenied:"Потрібен доступ адміністратора.", adminAccounts:"Акаунти", adminRegistered:"Зареєстровані", adminGuests:"Гості", adminBlocked:"Заблоковані", adminTrades:"Угоди", adminStore:"Сховище", adminActive:"Активний", adminStatus:"Статус", adminSessions:"Активні сесії", adminDisplayName:"Відображуване ім'я", adminResetPrompt:"Введіть новий пароль для {name}:", adminResetDone:"Пароль для {name} скинуто.", adminBlockedDone:"{name} заблоковано.", adminUnblocked:"{name} розблоковано.", adminDeleteConfirm:"Видалити {name} назавжди? Портфель та історію буде стерто, а ім'я користувача звільниться.", adminDeleted:"{name} видалено. Ім'я користувача знову вільне.", adminPwNote:"Зберігається як односторонній хеш — показати неможливо. Скиньте пароль.", guest:"Гість", guestNoLogin:"гість · без входу", blocked:"Заблоковано", joined:"приєднався",
   leaderboard:"Рейтинг", leaderHint:"За загальною дохідністю", leaderEmpty:"Гравців ще немає — зареєструйтеся й посядьте перше місце.", leaderGuest:"Ви граєте як гість. Зареєструйтеся, щоб потрапити до рейтингу.", leaderError:"Не вдалося завантажити рейтинг.", rank:"Місце", player:"Гравець", value:"Вартість", returnPct:"Дохідність", trades:"Угоди", you:"ви", playerCount:"{n} гравців", signUp:"Реєстрація", logIn:"Увійти", logOut:"Вийти", createAccount:"Створити акаунт", username:"Ім'я користувача", password:"Пароль", signUpSub:"Створіть акаунт, щоб зберегти прогрес і потрапити до рейтингу.", signUpKeeps:"Ваш поточний портфель залишається з вами — нічого не втрачено.", logInSub:"З поверненням. Увійдіть, щоб продовжити.", haveAccount:"Вже маєте акаунт?", noAccount:"Потрібен акаунт?", welcomeNew:"Вітаємо, {name}! Ви в рейтингу.", welcomeBack:"З поверненням, {name}.", loggedOut:"Ви вийшли. Граєте як гість.", confirmLogout:"Вийти з {name}?",
   tagline:"Практикуйте торгівлю криптовалютами на реальних ринкових даних з рейтингами на основі ШІ — без ризику, зі справжніми навичками.",
   langTitle:"Мова", langHint:"Оберіть мову інтерфейсу.",
@@ -1080,6 +1153,8 @@ uk: {
   errGeneric:"Щось пішло не так. Спробуйте ще раз.",
 },
 es: {
+  accountBlocked:"Tu cuenta ha sido bloqueada. Contacta con el administrador.",
+  master:"Maestro", confirmPassword:"Confirmar contraseña", passwordMismatch:"Las contraseñas no coinciden.", adminTitle:"Todos los jugadores", adminHint:"Acceso total. Bloquea, elimina o restablece cualquier cuenta.", adminSearch:"Buscar jugadores…", adminActions:"Acciones", adminView:"Ver", adminReset:"Restablecer contraseña", adminBlock:"Bloquear", adminUnblock:"Desbloquear", adminDelete:"Eliminar", adminNoMatch:"Ningún jugador coincide.", adminDenied:"Se requiere acceso de administrador.", adminAccounts:"Cuentas", adminRegistered:"Registrados", adminGuests:"Invitados", adminBlocked:"Bloqueados", adminTrades:"Operaciones", adminStore:"Almacén", adminActive:"Activo", adminStatus:"Estado", adminSessions:"Sesiones activas", adminDisplayName:"Nombre visible", adminResetPrompt:"Introduce una nueva contraseña para {name}:", adminResetDone:"Contraseña restablecida para {name}.", adminBlockedDone:"{name} ha sido bloqueado.", adminUnblocked:"{name} ha sido desbloqueado.", adminDeleteConfirm:"¿Eliminar {name} permanentemente? Su cartera e historial se borran y el nombre de usuario queda libre.", adminDeleted:"{name} eliminado. El nombre de usuario está libre.", adminPwNote:"Se guarda como hash unidireccional: no se puede mostrar. Usa Restablecer contraseña.", guest:"Invitado", guestNoLogin:"invitado · sin acceso", blocked:"Bloqueado", joined:"se unió",
   leaderboard:"Clasificación", leaderHint:"Ordenado por rendimiento total", leaderEmpty:"Aún no hay jugadores: regístrate y ocupa el primer puesto.", leaderGuest:"Estás jugando como invitado. Regístrate para aparecer en la clasificación.", leaderError:"No se pudo cargar la clasificación.", rank:"Puesto", player:"Jugador", value:"Valor", returnPct:"Rendimiento", trades:"Operaciones", you:"tú", playerCount:"{n} jugadores", signUp:"Registrarse", logIn:"Iniciar sesión", logOut:"Cerrar sesión", createAccount:"Crear cuenta", username:"Usuario", password:"Contraseña", signUpSub:"Crea una cuenta para guardar tu progreso y entrar en la clasificación.", signUpKeeps:"Tu cartera actual te acompaña: no se pierde nada.", logInSub:"Bienvenido de nuevo. Inicia sesión para continuar.", haveAccount:"¿Ya tienes cuenta?", noAccount:"¿Necesitas una cuenta?", welcomeNew:"¡Bienvenido, {name}! Ya estás en la clasificación.", welcomeBack:"Bienvenido de nuevo, {name}.", loggedOut:"Sesión cerrada. Juegas como invitado.", confirmLogout:"¿Cerrar la sesión de {name}?",
   tagline:"Practica el trading de criptomonedas con datos de mercado en vivo y calificaciones impulsadas por IA — cero riesgo, habilidades reales.",
   langTitle:"Idioma", langHint:"Elige el idioma de la interfaz.",
@@ -1139,6 +1214,8 @@ es: {
   errGeneric:"Algo salió mal. Inténtalo de nuevo.",
 },
 el: {
+  accountBlocked:"Ο λογαριασμός σας έχει αποκλειστεί. Επικοινωνήστε με τον διαχειριστή.",
+  master:"Κύριος", confirmPassword:"Επιβεβαίωση κωδικού", passwordMismatch:"Οι κωδικοί δεν ταιριάζουν.", adminTitle:"Όλοι οι παίκτες", adminHint:"Πλήρης πρόσβαση. Αποκλείστε, διαγράψτε ή επαναφέρετε οποιονδήποτε λογαριασμό.", adminSearch:"Αναζήτηση παικτών…", adminActions:"Ενέργειες", adminView:"Προβολή", adminReset:"Επαναφορά κωδικού", adminBlock:"Αποκλεισμός", adminUnblock:"Άρση αποκλεισμού", adminDelete:"Διαγραφή", adminNoMatch:"Κανένας παίκτης δεν ταιριάζει.", adminDenied:"Απαιτείται πρόσβαση διαχειριστή.", adminAccounts:"Λογαριασμοί", adminRegistered:"Εγγεγραμμένοι", adminGuests:"Επισκέπτες", adminBlocked:"Αποκλεισμένοι", adminTrades:"Συναλλαγές", adminStore:"Αποθήκη", adminActive:"Ενεργός", adminStatus:"Κατάσταση", adminSessions:"Ενεργές συνεδρίες", adminDisplayName:"Εμφανιζόμενο όνομα", adminResetPrompt:"Εισαγάγετε νέο κωδικό για τον/την {name}:", adminResetDone:"Ο κωδικός για {name} επαναφέρθηκε.", adminBlockedDone:"Ο/Η {name} αποκλείστηκε.", adminUnblocked:"Ο/Η {name} ξεμπλοκαρίστηκε.", adminDeleteConfirm:"Οριστική διαγραφή του/της {name}; Το χαρτοφυλάκιο και το ιστορικό διαγράφονται και το όνομα χρήστη ελευθερώνεται.", adminDeleted:"Ο/Η {name} διαγράφηκε. Το όνομα χρήστη είναι ξανά διαθέσιμο.", adminPwNote:"Αποθηκεύεται ως μονόδρομο hash — δεν μπορεί να εμφανιστεί. Χρησιμοποιήστε Επαναφορά κωδικού.", guest:"Επισκέπτης", guestNoLogin:"επισκέπτης · χωρίς σύνδεση", blocked:"Αποκλεισμένος", joined:"εγγράφηκε",
   leaderboard:"Κατάταξη", leaderHint:"Ταξινόμηση κατά συνολική απόδοση", leaderEmpty:"Δεν υπάρχουν παίκτες ακόμη — εγγραφείτε και πάρτε την πρώτη θέση.", leaderGuest:"Παίζετε ως επισκέπτης. Εγγραφείτε για να εμφανιστείτε στην κατάταξη.", leaderError:"Δεν ήταν δυνατή η φόρτωση της κατάταξης.", rank:"Θέση", player:"Παίκτης", value:"Αξία", returnPct:"Απόδοση", trades:"Συναλλαγές", you:"εσείς", playerCount:"{n} παίκτες", signUp:"Εγγραφή", logIn:"Σύνδεση", logOut:"Αποσύνδεση", createAccount:"Δημιουργία λογαριασμού", username:"Όνομα χρήστη", password:"Κωδικός", signUpSub:"Δημιουργήστε λογαριασμό για να αποθηκεύσετε την πρόοδό σας και να μπείτε στην κατάταξη.", signUpKeeps:"Το τρέχον χαρτοφυλάκιό σας σας ακολουθεί — τίποτα δεν χάνεται.", logInSub:"Καλώς ορίσατε ξανά. Συνδεθείτε για να συνεχίσετε.", haveAccount:"Έχετε ήδη λογαριασμό;", noAccount:"Χρειάζεστε λογαριασμό;", welcomeNew:"Καλώς ήρθατε, {name}! Είστε στην κατάταξη.", welcomeBack:"Καλώς ήρθατε ξανά, {name}.", loggedOut:"Αποσυνδεθήκατε. Παίζετε ως επισκέπτης.", confirmLogout:"Αποσύνδεση από {name};",
   tagline:"Εξασκηθείτε στις συναλλαγές κρυπτονομισμάτων με ζωντανά δεδομένα αγοράς και αξιολογήσεις ΤΝ — μηδενικό ρίσκο, πραγματικές δεξιότητες.",
   langTitle:"Γλώσσα", langHint:"Επιλέξτε τη γλώσσα της διεπαφής.",
@@ -1209,6 +1286,7 @@ function t(key, vars) {
 }
 function applyStatic() {
   document.querySelectorAll('[data-i18n]').forEach(n => { n.textContent = t(n.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-ph]').forEach(n => { n.placeholder = t(n.dataset.i18nPh); });
 }
 
 /* ══ State & helpers ════════════════════════════════════════════════════ */
@@ -1225,7 +1303,7 @@ const S = {
   settings:null, assets:[], weights:null, defaults:null, thresholds:{},
   sort:{key:'composite',dir:-1}, view:'market', open:null, side:'BUY',
   manual:null, cycleSeconds:60, updatedAt:null, cycle:0, disconnected:false,
-  user:null,
+  user:null, blockedNotified:false,
   pfRange: localStorage.getItem('pfRange') || '24h',
   statMetric:null, statRange:'24h',
   drawerPriceRange:'24h', drawerScoreRange:'24h',
@@ -2023,19 +2101,32 @@ const Auth = {
     $('#authAltText').textContent = t(signup ? 'haveAccount' : 'noAccount');
     $('#authSwap').textContent = t(signup ? 'logIn' : 'signUp');
     $('#authPass').autocomplete = signup ? 'new-password' : 'current-password';
+    // Confirmation only on signup -- asking a returning user to type their
+    // password twice is friction with nothing to catch.
+    $('#authConfirmRow').classList.toggle('hide', !signup);
+    $('#authConfirm').required = signup;
   },
 
   async submit(e) {
     e.preventDefault();
+    const signup = this.mode === 'signup';
     const username = $('#authUser').value.trim();
     const password = $('#authPass').value;
+    const confirm = $('#authConfirm').value;
     const err = $('#authErr');
     err.textContent = '';
+
+    if (signup && password !== confirm) {
+      err.textContent = t('passwordMismatch');
+      $('#authConfirm').focus();
+      return;
+    }
+
     $('#authGo').disabled = true;
     try {
-      await api(this.mode === 'signup' ? '/api/auth/signup' : '/api/auth/login', {
+      await api(signup ? '/api/auth/signup' : '/api/auth/login', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify(signup ? { username, password, confirm } : { username, password }),
       });
       this.close();
       S.histCache = {};
@@ -2072,6 +2163,19 @@ function renderAccount() {
   btn.classList.toggle('guest', S.user.is_guest);
   $('#acctName').textContent = S.user.is_guest ? t('signUp') : S.user.name;
   btn.title = S.user.is_guest ? t('signUpSub') : t('logOut');
+
+  // The Master tab is only shown to an admin. This is presentation only --
+  // every admin route 404s for anyone else regardless of what the UI renders.
+  const tab = $('#adminTab');
+  tab.classList.toggle('hide', !S.user.is_admin);
+  if (!S.user.is_admin && S.view === 'admin') setView('market');
+
+  // A blocked account 403s on every data endpoint, so without this the page
+  // would just sit empty with no explanation.
+  if (S.user.is_blocked && !S.blockedNotified) {
+    S.blockedNotified = true;
+    toast(t('accountBlocked'), false);
+  }
 }
 
 /* ══ Leaderboard ════════════════════════════════════════════════════════ */
@@ -2115,6 +2219,151 @@ async function renderLeaders() {
   }
 }
 
+/* ══ Master console ═════════════════════════════════════════════════════ */
+const Admin = {
+  players: [],
+  filter: '',
+
+  async load() {
+    const body = $('#adminBody');
+    let d;
+    try { d = await api('/api/admin/players'); }
+    catch { body.innerHTML = `<div class="lb-empty">${esc(t('adminDenied'))}</div>`; return; }
+    this.players = d.players;
+    this.me = d.you;
+    this.renderStats(d.stats);
+    this.render();
+  },
+
+  renderStats(s) {
+    const tiles = [
+      ['adminAccounts', s.total_accounts],
+      ['adminRegistered', s.registered],
+      ['adminGuests', s.guests],
+      ['adminBlocked', s.blocked],
+      ['adminTrades', s.total_trades],
+    ];
+    $('#adminStats').innerHTML = tiles.map(([k, v]) =>
+      `<div class="tile"><div class="label">${esc(t(k))}</div>
+        <div class="value num">${v}</div></div>`).join('') +
+      `<div class="tile"><div class="label">${esc(t('adminStore'))}</div>
+        <div class="value num" style="font-size:15px">${esc(s.store_backend)}</div></div>`;
+  },
+
+  render() {
+    const q = this.filter.trim().toLowerCase();
+    const rows = this.players.filter(p =>
+      !q || (p.username || '').toLowerCase().includes(q) ||
+            (p.name || '').toLowerCase().includes(q));
+
+    const head = `<div class="ad-row head">
+      <div>${esc(t('player'))}</div>
+      <div class="ad-num">${esc(t('value'))}</div>
+      <div class="ad-num">${esc(t('returnPct'))}</div>
+      <div class="ad-num">${esc(t('trades'))}</div>
+      <div style="text-align:right">${esc(t('adminActions'))}</div></div>`;
+
+    if (!rows.length) {
+      $('#adminBody').innerHTML = head +
+        `<div class="lb-empty">${esc(t('adminNoMatch'))}</div>`;
+      return;
+    }
+
+    $('#adminBody').innerHTML = head + rows.map(p => {
+      const tags =
+        (p.is_admin ? `<span class="ad-tag admin">${esc(t('master'))}</span>` : '') +
+        (p.is_guest ? `<span class="ad-tag guest">${esc(t('guest'))}</span>` : '') +
+        (p.is_blocked ? `<span class="ad-tag blocked">${esc(t('blocked'))}</span>` : '');
+      // Admins are protected server-side too; disabling here just avoids
+      // offering an action that will be refused.
+      const locked = p.is_admin;
+      return `<div class="ad-row${p.is_blocked ? ' blocked' : ''}${p.id === this.me ? ' self' : ''}">
+        <div class="ad-who">
+          <div class="ad-name">${esc(p.name)}${tags}</div>
+          <div class="ad-sub">${esc(p.username || t('guestNoLogin'))} · #${p.id} · ${esc(t('joined'))} ${fmtDate(p.created_ts)}</div>
+        </div>
+        <div class="ad-num">${money(p.total, 2)}</div>
+        <div class="ad-num ${sgn(p.return_pct)}">${pct(p.return_pct)}</div>
+        <div class="ad-num">${p.trades}</div>
+        <div class="ad-acts">
+          <button class="ad-btn" data-act="view" data-id="${p.id}">${esc(t('adminView'))}</button>
+          <button class="ad-btn" data-act="pw" data-id="${p.id}" ${p.is_guest ? 'disabled' : ''}>${esc(t('adminReset'))}</button>
+          <span class="ad-pair">
+            <button class="ad-btn" data-act="block" data-id="${p.id}" ${locked ? 'disabled' : ''}>${esc(t(p.is_blocked ? 'adminUnblock' : 'adminBlock'))}</button>
+            <button class="ad-btn danger" data-act="del" data-id="${p.id}" ${locked ? 'disabled' : ''}>${esc(t('adminDelete'))}</button>
+          </span>
+        </div>
+      </div>`;
+    }).join('');
+  },
+
+  find(id) { return this.players.find(p => p.id === id); },
+
+  async act(action, id) {
+    const p = this.find(id);
+    if (!p) return;
+    const who = p.username || p.name;
+    try {
+      if (action === 'view') return this.view(id);
+
+      if (action === 'pw') {
+        const npw = prompt(t('adminResetPrompt', { name: who }));
+        if (!npw) return;
+        await api(`/api/admin/player/${id}/password`, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ password: npw }),
+        });
+        toast(t('adminResetDone', { name: who }), true);
+      }
+
+      if (action === 'block') {
+        await api(`/api/admin/player/${id}/block`, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ blocked: !p.is_blocked }),
+        });
+        toast(t(p.is_blocked ? 'adminUnblocked' : 'adminBlockedDone', { name: who }), true);
+      }
+
+      if (action === 'del') {
+        // Irreversible and frees the username, so it is worth spelling out.
+        if (!confirm(t('adminDeleteConfirm', { name: who }))) return;
+        await api(`/api/admin/player/${id}/delete`, { method:'POST' });
+        toast(t('adminDeleted', { name: who }), true);
+      }
+      await this.load();
+    } catch (e) {
+      toast(e.message, false);
+    }
+  },
+
+  async view(id) {
+    let d;
+    try { d = await api(`/api/admin/player/${id}`); }
+    catch (e) { return toast(e.message, false); }
+    const p = d.portfolio;
+    const lines = [
+      `${t('username')}: ${d.username}`,
+      `${t('adminDisplayName')}: ${d.display_name}`,
+      `ID: ${d.id}`,
+      `${t('joined')}: ${fmtDate(d.created_ts)}`,
+      `${t('adminStatus')}: ${d.is_blocked ? t('blocked') : t('adminActive')}`
+        + (d.is_guest ? ` (${t('guest')})` : '') + (d.is_admin ? ` (${t('master')})` : ''),
+      `${t('adminSessions')}: ${d.sessions.length}`,
+      '',
+      `${t('cash')}: ${money(p.cash, 2)}`,
+      `${t('value')}: ${money(p.total, 2)}`,
+      `${t('returnPct')}: ${pct(p.total_return_pct)}`,
+      `${t('realized')}: ${money(p.realized_pnl, 2)}`,
+      `${t('fees')}: ${money(p.fees_paid, 2)}`,
+      `${t('trades')}: ${p.trade_count}`,
+      `${t('holdings')}: ${p.holdings.map(h => `${h.symbol} ${h.qty.toFixed(6)}`).join(', ') || '—'}`,
+      '',
+      `${t('password')}: ${t('adminPwNote')}`,
+    ];
+    alert(lines.join('\n'));
+  },
+};
+
 /* ══ Views & data flow ══════════════════════════════════════════════════ */
 function setView(v) {
   S.view = v;
@@ -2122,6 +2371,7 @@ function setView(v) {
   $('#view-portfolio').classList.toggle('hide', v !== 'portfolio');
   $('#view-stat').classList.toggle('hide', v !== 'stat');
   $('#view-leaders').classList.toggle('hide', v !== 'leaders');
+  $('#view-admin').classList.toggle('hide', v !== 'admin');
   document.querySelectorAll('.tabs .btn').forEach(b =>
     b.classList.toggle('on', b.dataset.view === (v === 'stat' ? 'portfolio' : v)));
 }
@@ -2224,7 +2474,17 @@ document.querySelectorAll('.tabs .btn').forEach(b => {
     setView(b.dataset.view);
     if (b.dataset.view === 'portfolio') renderPortfolio();
     if (b.dataset.view === 'leaders') renderLeaders();
+    if (b.dataset.view === 'admin') Admin.load();
   });
+});
+
+/* Master console: delegated so rows can re-render freely. */
+$('#adminBody').addEventListener('click', e => {
+  const b = e.target.closest('[data-act]');
+  if (b && !b.disabled) Admin.act(b.dataset.act, Number(b.dataset.id));
+});
+$('#adminSearch').addEventListener('input', e => {
+  Admin.filter = e.target.value; Admin.render();
 });
 $('#statBack').addEventListener('click', () => { setView('portfolio'); renderPortfolio(); });
 $('#resetWeights').addEventListener('click', () => {

@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import accounts
+import admin
 import config
 import db
 import engine
@@ -59,6 +60,8 @@ async def lifespan(app: FastAPI):
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     db.connect()
+    userstore.connect()
+    admin.ensure_master()
     _engine_task = asyncio.create_task(engine.loop())
     log.info("engine started (cycle=%ds)", config.CYCLE_SECONDS)
     try:
@@ -120,10 +123,28 @@ def require_user(request: Request, response: Response) -> dict[str, Any]:
     """
     user = current_user(request)
     if user:
+        # A block takes effect immediately, not at next login: their sessions
+        # are dropped when blocked, but one could still be in flight.
+        if user.get("is_blocked"):
+            raise HTTPException(
+                403, "This account has been blocked. "
+                     "Please contact the administrator.")
         return user
     guest = accounts.create_guest(settings.get()["starting_capital"])
     _set_session(response, userstore.new_session(guest["id"]))
     return guest
+
+
+def require_admin(request: Request, response: Response) -> dict[str, Any]:
+    """Resolve the caller and refuse anyone who is not an administrator.
+
+    404 rather than 403 for non-admins: a distinct 403 would confirm the admin
+    surface exists to anyone probing for it.
+    """
+    user = require_user(request, response)
+    if not admin.is_admin(user):
+        raise HTTPException(404, "Not found")
+    return user
 
 
 def _range_cutoff(range_key: str) -> int | None:
@@ -347,12 +368,22 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
         "name": user["display_name"],
         "username": None if user.get("is_guest") else user["username"],
         "is_guest": bool(user.get("is_guest")),
+        "is_admin": bool(user.get("is_admin")),
     }
 
 
 @app.get("/api/me")
 async def me(request: Request, response: Response) -> dict[str, Any]:
-    return {"user": _public_user(require_user(request, response))}
+    """Identity only. Unlike every other endpoint this does not 403 a blocked
+    account -- the client needs to be able to read its own state in order to
+    explain the block, rather than just failing silently."""
+    user = current_user(request)
+    if user is None:
+        guest = accounts.create_guest(settings.get()["starting_capital"])
+        _set_session(response, userstore.new_session(guest["id"]))
+        user = guest
+    return {"user": {**_public_user(user),
+                     "is_blocked": bool(user.get("is_blocked"))}}
 
 
 @app.post("/api/auth/signup")
@@ -361,6 +392,13 @@ async def signup(payload: dict[str, Any], request: Request,
     """Create an account. A guest keeps the portfolio it already built."""
     username = str(payload.get("username", ""))
     password = str(payload.get("password", ""))
+    confirm = payload.get("confirm")
+
+    # Checked server-side too: the client validates for immediacy, but a typo
+    # locking someone out of a brand-new account is worth blocking at both ends.
+    if confirm is not None and str(confirm) != password:
+        raise HTTPException(400, "The two passwords do not match.")
+
     existing = current_user(request)
 
     try:
@@ -382,6 +420,9 @@ async def login(payload: dict[str, Any], request: Request,
     try:
         user = accounts.authenticate(
             str(payload.get("username", "")), str(payload.get("password", "")))
+    except accounts.BlockedError as e:
+        # 403, not 401: the credentials were correct, the account is barred.
+        raise HTTPException(403, str(e)) from None
     except accounts.AuthError as e:
         raise HTTPException(401, str(e)) from None
 
@@ -412,6 +453,66 @@ async def leaderboard(request: Request, response: Response,
         "is_guest": bool(user.get("is_guest")),
         "total_players": len(rows),
     }
+
+
+# --- Administration --------------------------------------------------------
+#
+# Every route here is admin-only and returns 404 to everyone else, so the
+# surface is not discoverable by probing. No route can reveal a password:
+# they are one-way hashes, and reset is the supported recovery path.
+
+
+@app.get("/api/admin/players")
+async def admin_players(request: Request, response: Response) -> dict[str, Any]:
+    admin_user = require_admin(request, response)
+    prices = _current_prices()
+    return {
+        "players": admin.list_players(prices),
+        "stats": admin.stats(prices),
+        "you": admin_user["id"],
+    }
+
+
+@app.get("/api/admin/player/{user_id}")
+async def admin_player(user_id: int, request: Request,
+                       response: Response) -> dict[str, Any]:
+    require_admin(request, response)
+    try:
+        return admin.player_detail(user_id, _current_prices())
+    except admin.AdminError as e:
+        raise HTTPException(404, str(e)) from None
+
+
+@app.post("/api/admin/player/{user_id}/block")
+async def admin_block(user_id: int, payload: dict[str, Any], request: Request,
+                      response: Response) -> dict[str, Any]:
+    require_admin(request, response)
+    try:
+        return admin.set_blocked(user_id, bool(payload.get("blocked", True)))
+    except admin.AdminError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@app.post("/api/admin/player/{user_id}/delete")
+async def admin_delete(user_id: int, request: Request,
+                       response: Response) -> dict[str, Any]:
+    """Delete a player and release their username for reuse."""
+    require_admin(request, response)
+    try:
+        return admin.delete_player(user_id)
+    except admin.AdminError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@app.post("/api/admin/player/{user_id}/password")
+async def admin_reset_password(user_id: int, payload: dict[str, Any],
+                               request: Request,
+                               response: Response) -> dict[str, Any]:
+    require_admin(request, response)
+    try:
+        return admin.reset_password(user_id, str(payload.get("password", "")))
+    except admin.AdminError as e:
+        raise HTTPException(400, str(e)) from None
 
 
 # --- Portfolio -------------------------------------------------------------

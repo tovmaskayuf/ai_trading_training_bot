@@ -64,12 +64,13 @@ that suite fails loudly rather than skipping, which is deliberate.
 .venv/bin/python tests/test_indicators.py    # indicator correctness
 .venv/bin/python tests/test_manual.py        # legacy portfolio accounting
 .venv/bin/python tests/test_portfolio.py     # per-user portfolios + leaderboard
+.venv/bin/python tests/test_admin.py         # block / delete / reset + no password leak
 .venv/bin/python tests/test_frontend.py      # JS parses, i18n parity, DOM sanity
 .venv/bin/python -m uvicorn server:app --port 8000   # run everything
 ```
 
-`test_portfolio.py` runs against whichever backend is configured, so it doubles
-as the Postgres check:
+`test_portfolio.py` and `test_admin.py` run against whichever backend is
+configured, so they double as the Postgres check:
 `DATABASE_URL=postgresql://… .venv/bin/python tests/test_portfolio.py`.
 
 Always run from the project root. Tests point `config.DB_PATH` (and
@@ -226,6 +227,39 @@ First-time visitors get a **guest** row (`is_guest = 1`, unusable password)
 so they can trade before signing up; `claim_account()` converts that same row
 in place so their portfolio carries over. Guests are kept off the leaderboard.
 
+Signup takes a `confirm` field and rejects a mismatch **server-side as well as
+in the client** — a typo on a brand-new account locks the owner out of it.
+
+### Administration (`admin.py`)
+
+One admin account, seeded by `ensure_master()` from `MASTER_USERNAME` /
+`MASTER_PASSWORD` at startup. **The password is never committed** — the repo is
+public. With `MASTER_PASSWORD` unset no admin account is created at all, rather
+than one with a guessable password. The hash is re-applied on every boot, so
+rotating the env var rotates the credential.
+
+**Passwords cannot be revealed, and this is not a gap to be closed.** They are
+PBKDF2 hashes; there is nothing to read back, and storing them reversibly would
+expose every player (people reuse passwords across sites) for no operational
+gain. `reset_password()` is the supported recovery path. `list_players()` and
+`player_detail()` return `password: None` with a note saying why, so the UI
+never implies otherwise. `tests/test_admin.py` asserts no hash-shaped string
+appears in either payload.
+
+Admin routes return **404, not 403**, to non-admins — a distinct 403 would
+confirm the surface exists to anyone probing.
+
+Blocking **leaves the user's sessions in place**. Deleting them would make the
+account anonymous, and `require_user()` would hand it a fresh guest — so a
+blocked player would silently keep playing rather than being told. With the
+session intact every request resolves to them and returns an explicit 403.
+`/api/me` is the one exception: it answers so the client can *explain* the
+block instead of failing blank.
+
+`delete_player()` removes the rows outright rather than tombstoning, because
+freeing the username for reuse is the point. Admins cannot be blocked or
+deleted, which also stops the operator locking themselves out.
+
 ### Server (`server.py`)
 
 `RANGES` maps `1h|24h|7d|30d|1y|all` to cutoffs; history endpoints downsample
@@ -253,8 +287,14 @@ views, a clickable stat sub-page per tile (Cash / Invested / Unrealized /
 Realized / Fees), buy/sell drawer, account modal, SSE live updates, light/dark
 themes.
 
-- **i18n**: `I18N` dict with `en`/`hy`/`uk`/`es`/`el`, 160 keys each — keep
+- **Header layout**: the live/cycle status pill sits between the brand and the
+  view tabs, held there by a `.header-gap` spacer on each side. It is
+  deliberately *not* centred on the viewport — the right-hand cluster is wider
+  than the brand, so a true centre reads as closer to the tabs than the logo.
+- **i18n**: `I18N` dict with `en`/`hy`/`uk`/`es`/`el`, 196 keys each — keep
   all five languages in exact key parity when adding strings.
+  `data-i18n` sets `textContent`, `data-i18n-ph` sets `placeholder`; both are
+  swept by `applyStatic()` and both are checked by the frontend test.
   `tests/test_frontend.py` checks this by **evaluating the object in node**,
   not by regex: keys inside translated prose ("no hay jugadores: …") produced
   false mismatches when it was done textually. `t(key, vars)` does `{var}`

@@ -186,9 +186,13 @@ def _dummy_hash() -> str:
 _DUMMY: str | None = None
 
 
+class BlockedError(AuthError):
+    """A valid credential for an account that has been blocked."""
+
+
 def authenticate(username: str, password: str) -> dict[str, Any]:
     row = userstore.query_one(
-        "SELECT id, username, display_name, password_hash "
+        "SELECT id, username, display_name, password_hash, is_blocked, is_admin "
         "FROM users WHERE LOWER(username) = LOWER(?)",
         ((username or "").strip(),),
     )
@@ -198,8 +202,14 @@ def authenticate(username: str, password: str) -> dict[str, Any]:
     ok = verify_password(password or "", stored)
     if not row or not ok:
         raise AuthError("Incorrect username or password.")
+    # Checked only after the password verifies: telling an unauthenticated
+    # caller that an account is blocked would confirm the username exists.
+    if row["is_blocked"]:
+        raise BlockedError(
+            "This account has been blocked. Please contact the administrator.")
     return {"id": row["id"], "username": row["username"],
-            "display_name": row["display_name"]}
+            "display_name": row["display_name"],
+            "is_admin": bool(row["is_admin"])}
 
 
 def rename(user_id: int, display_name: str) -> str:
