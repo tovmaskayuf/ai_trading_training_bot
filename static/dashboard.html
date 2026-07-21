@@ -519,6 +519,62 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
 .legend { display:flex; gap:14px; flex-wrap:wrap; font-size:11px; color:var(--text-secondary); }
 .legend span { display:flex; align-items:center; gap:5px; }
 
+/* ── Account + leaderboard ─────────────────────────────────────────────── */
+.btn.acct { display:flex; align-items:center; gap:6px; max-width:170px; }
+.btn.acct #acctName { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.btn.acct.guest { border-style:dashed; }
+
+.modal-wrap {
+  position:fixed; inset:0; z-index:200; display:flex;
+  align-items:center; justify-content:center; padding:20px;
+  background:color-mix(in srgb, #000 55%, transparent); backdrop-filter:blur(4px);
+}
+.modal-wrap.hide { display:none; }
+.modal {
+  position:relative; width:100%; max-width:380px;
+  background:var(--surface-0); border:1px solid var(--border);
+  border-radius:18px; padding:28px 26px 22px;
+  box-shadow:0 24px 60px rgba(0,0,0,.45);
+}
+.modal h2 { font-size:19px; letter-spacing:-.02em; margin-bottom:6px; }
+.modal-sub { font-size:12.5px; color:var(--text-secondary); margin-bottom:18px; line-height:1.5; }
+.modal-x {
+  position:absolute; top:12px; right:12px; width:30px; height:30px;
+  border:0; border-radius:50%; background:transparent; cursor:pointer;
+  color:var(--text-muted); font-size:20px; line-height:1;
+}
+.modal-x:hover { background:var(--surface-1); color:var(--text-primary); }
+.fld { display:block; margin-bottom:13px; }
+.fld span { display:block; font-size:11.5px; color:var(--text-secondary); margin-bottom:5px; }
+.fld input {
+  width:100%; background:var(--surface-1); border:1px solid var(--border);
+  color:var(--text-primary); border-radius:10px; padding:10px 12px;
+  font-size:14px; font-family:inherit; outline:none; transition:border-color .15s;
+}
+.fld input:focus { border-color:var(--accent); }
+.auth-err { color:var(--critical); font-size:12px; min-height:17px; margin:2px 0 8px; }
+.auth-alt { margin-top:14px; text-align:center; font-size:12.5px; color:var(--text-secondary); }
+.link-btn {
+  background:none; border:0; padding:0 0 0 5px; cursor:pointer;
+  color:var(--accent); font:inherit; font-size:12.5px; text-decoration:underline;
+}
+
+.lb-row {
+  display:grid; grid-template-columns:52px 1fr 108px 96px 76px;
+  gap:12px; align-items:center; padding:11px 14px;
+  border-bottom:1px solid var(--border); font-size:13px;
+}
+.lb-row.head { color:var(--text-muted); font-size:11px; text-transform:uppercase;
+  letter-spacing:.05em; border-bottom-color:var(--border-bright); }
+.lb-row.you { background:color-mix(in srgb, var(--accent) 11%, transparent);
+  border-radius:10px; }
+.lb-rank { font-family:var(--mono); color:var(--text-secondary); }
+.lb-rank.medal { font-size:16px; }
+.lb-name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lb-name .youtag { color:var(--accent); font-weight:500; font-size:11px; margin-left:6px; }
+.lb-num { font-family:var(--mono); text-align:right; }
+.lb-empty { padding:30px 14px; text-align:center; color:var(--text-secondary); font-size:13px; }
+
 .site-foot {
   margin-top:28px; padding:18px 2px 4px; border-top:1px solid var(--border);
   display:flex; align-items:center; justify-content:center; gap:5px;
@@ -671,7 +727,9 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
   <div class="tabs">
     <button class="btn on" data-view="market" data-i18n="markets"></button>
     <button class="btn" data-view="portfolio" data-i18n="portfolio"></button>
+    <button class="btn" data-view="leaders" data-i18n="leaderboard"></button>
   </div>
+  <button class="btn acct" id="acctBtn"><span id="acctName"></span></button>
   <select class="lang-sel" id="langSel" aria-label="Language"></select>
   <button class="btn icon" id="themeBtn" title="Theme">◐</button>
   <button class="btn icon" id="setupBtn" title="Setup">⚙</button>
@@ -781,6 +839,19 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
     </div></div>
   </section>
 
+  <!-- Leaderboard -->
+  <section id="view-leaders" class="hide">
+    <div class="panel">
+      <div class="panel-head">
+        <h2 data-i18n="leaderboard"></h2>
+        <span class="hint" data-i18n="leaderHint"></span>
+        <div class="spacer"></div>
+        <span class="bs" id="leaderCount"></span>
+      </div>
+      <div id="leaderBody"></div>
+    </div>
+  </section>
+
   <!-- CoinGecko's free Demo tier requires visible attribution. Binance and
        Hyperliquid are credited alongside it since they supply the prices. -->
   <footer class="site-foot">
@@ -795,6 +866,33 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
 </main>
 </div>
 
+<!-- Account modal: sign in, or claim the guest portfolio already in progress -->
+<div class="modal-wrap hide" id="authWrap">
+  <div class="modal" id="authModal">
+    <button class="modal-x" id="authClose" aria-label="Close">×</button>
+    <h2 id="authTitle"></h2>
+    <p class="modal-sub" id="authSub"></p>
+    <form id="authForm" autocomplete="on">
+      <label class="fld">
+        <span data-i18n="username"></span>
+        <input id="authUser" name="username" autocomplete="username"
+               autocapitalize="none" spellcheck="false" required>
+      </label>
+      <label class="fld">
+        <span data-i18n="password"></span>
+        <input id="authPass" name="password" type="password"
+               autocomplete="current-password" required>
+      </label>
+      <div class="auth-err" id="authErr"></div>
+      <button class="submit buy" id="authGo" type="submit"></button>
+    </form>
+    <div class="auth-alt">
+      <span id="authAltText"></span>
+      <button class="link-btn" id="authSwap"></button>
+    </div>
+  </div>
+</div>
+
 <div class="scrim" id="scrim"></div>
 <aside class="drawer" id="drawer"></aside>
 <div class="tip" id="tip"></div>
@@ -806,6 +904,7 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
 /* ══ Internationalization ═══════════════════════════════════════════════ */
 const I18N = {
 en: {
+  leaderboard:"Leaderboard", leaderHint:"Ranked by total return", leaderEmpty:"No players yet — sign up to claim the top spot.", leaderGuest:"You are playing as a guest. Sign up to appear on the leaderboard.", leaderError:"Could not load the leaderboard.", rank:"Rank", player:"Player", value:"Value", returnPct:"Return", trades:"Trades", you:"you", playerCount:"{n} players", signUp:"Sign up", logIn:"Log in", logOut:"Log out", createAccount:"Create account", username:"Username", password:"Password", signUpSub:"Create an account to save your progress and join the leaderboard.", signUpKeeps:"Your current portfolio comes with you — nothing is lost.", logInSub:"Welcome back. Log in to pick up where you left off.", haveAccount:"Already have an account?", noAccount:"Need an account?", welcomeNew:"Welcome, {name}! You are on the leaderboard.", welcomeBack:"Welcome back, {name}.", loggedOut:"Logged out. You are playing as a guest.", confirmLogout:"Log out of {name}?",
   tagline:"Practice cryptocurrency trading with live market data and AI-powered ratings — zero risk, real skills.",
   langTitle:"Language", langHint:"Choose your interface language.",
   assetsTitle:"Assets to Follow", assetsHint:"Switch on the cryptocurrencies you want to track and trade.",
@@ -864,6 +963,7 @@ en: {
   errGeneric:"Something went wrong. Please try again.",
 },
 hy: {
+  leaderboard:"Առաջատարներ", leaderHint:"Դասավորված ըստ ընդհանուր եկամտի", leaderEmpty:"Դեռ խաղացողներ չկան — գրանցվեք և զբաղեցրեք առաջին տեղը։", leaderGuest:"Դուք խաղում եք որպես հյուր։ Գրանցվեք՝ ցուցակում հայտնվելու համար։", leaderError:"Չհաջողվեց բեռնել առաջատարների ցանկը։", rank:"Տեղ", player:"Խաղացող", value:"Արժեք", returnPct:"Եկամուտ", trades:"Գործարքներ", you:"դուք", playerCount:"{n} խաղացող", signUp:"Գրանցվել", logIn:"Մուտք", logOut:"Ելք", createAccount:"Ստեղծել հաշիվ", username:"Օգտանուն", password:"Գաղտնաբառ", signUpSub:"Ստեղծեք հաշիվ՝ առաջընթացը պահպանելու և ցուցակին միանալու համար։", signUpKeeps:"Ձեր ընթացիկ պորտֆելը մնում է ձեզ հետ — ոչինչ չի կորչում։", logInSub:"Բարի վերադարձ։ Մուտք գործեք՝ շարունակելու համար։", haveAccount:"Արդեն ունե՞ք հաշիվ։", noAccount:"Հաշիվ պե՞տք է։", welcomeNew:"Բարի գալուստ, {name}: Դուք ցուցակում եք։", welcomeBack:"Բարի վերադարձ, {name}։", loggedOut:"Դուրս եկաք։ Խաղում եք որպես հյուր։", confirmLogout:"Դուրս գա՞լ {name} հաշվից։",
   tagline:"Փորձեք կրիպտոարժույթների առևտուրը իրական շուկայական տվյալներով և AI գնահատականներով — զրո ռիսկ, իրական հմտություններ։",
   langTitle:"Լեզու", langHint:"Ընտրեք ինտերֆեյսի լեզուն։",
   assetsTitle:"Հետևվող ակտիվներ", assetsHint:"Միացրեք այն կրիպտոարժույթները, որոնց ուզում եք հետևել և առևտուր անել։",
@@ -922,6 +1022,7 @@ hy: {
   errGeneric:"Ինչ-որ բան սխալ գնաց։ Խնդրում ենք կրկին փորձել։",
 },
 uk: {
+  leaderboard:"Рейтинг", leaderHint:"За загальною дохідністю", leaderEmpty:"Гравців ще немає — зареєструйтеся й посядьте перше місце.", leaderGuest:"Ви граєте як гість. Зареєструйтеся, щоб потрапити до рейтингу.", leaderError:"Не вдалося завантажити рейтинг.", rank:"Місце", player:"Гравець", value:"Вартість", returnPct:"Дохідність", trades:"Угоди", you:"ви", playerCount:"{n} гравців", signUp:"Реєстрація", logIn:"Увійти", logOut:"Вийти", createAccount:"Створити акаунт", username:"Ім'я користувача", password:"Пароль", signUpSub:"Створіть акаунт, щоб зберегти прогрес і потрапити до рейтингу.", signUpKeeps:"Ваш поточний портфель залишається з вами — нічого не втрачено.", logInSub:"З поверненням. Увійдіть, щоб продовжити.", haveAccount:"Вже маєте акаунт?", noAccount:"Потрібен акаунт?", welcomeNew:"Вітаємо, {name}! Ви в рейтингу.", welcomeBack:"З поверненням, {name}.", loggedOut:"Ви вийшли. Граєте як гість.", confirmLogout:"Вийти з {name}?",
   tagline:"Практикуйте торгівлю криптовалютами на реальних ринкових даних з рейтингами на основі ШІ — без ризику, зі справжніми навичками.",
   langTitle:"Мова", langHint:"Оберіть мову інтерфейсу.",
   assetsTitle:"Активи для відстеження", assetsHint:"Увімкніть криптовалюти, які хочете відстежувати й торгувати.",
@@ -980,6 +1081,7 @@ uk: {
   errGeneric:"Щось пішло не так. Спробуйте ще раз.",
 },
 es: {
+  leaderboard:"Clasificación", leaderHint:"Ordenado por rendimiento total", leaderEmpty:"Aún no hay jugadores: regístrate y ocupa el primer puesto.", leaderGuest:"Estás jugando como invitado. Regístrate para aparecer en la clasificación.", leaderError:"No se pudo cargar la clasificación.", rank:"Puesto", player:"Jugador", value:"Valor", returnPct:"Rendimiento", trades:"Operaciones", you:"tú", playerCount:"{n} jugadores", signUp:"Registrarse", logIn:"Iniciar sesión", logOut:"Cerrar sesión", createAccount:"Crear cuenta", username:"Usuario", password:"Contraseña", signUpSub:"Crea una cuenta para guardar tu progreso y entrar en la clasificación.", signUpKeeps:"Tu cartera actual te acompaña: no se pierde nada.", logInSub:"Bienvenido de nuevo. Inicia sesión para continuar.", haveAccount:"¿Ya tienes cuenta?", noAccount:"¿Necesitas una cuenta?", welcomeNew:"¡Bienvenido, {name}! Ya estás en la clasificación.", welcomeBack:"Bienvenido de nuevo, {name}.", loggedOut:"Sesión cerrada. Juegas como invitado.", confirmLogout:"¿Cerrar la sesión de {name}?",
   tagline:"Practica el trading de criptomonedas con datos de mercado en vivo y calificaciones impulsadas por IA — cero riesgo, habilidades reales.",
   langTitle:"Idioma", langHint:"Elige el idioma de la interfaz.",
   assetsTitle:"Activos a seguir", assetsHint:"Activa las criptomonedas que quieras seguir y operar.",
@@ -1038,6 +1140,7 @@ es: {
   errGeneric:"Algo salió mal. Inténtalo de nuevo.",
 },
 el: {
+  leaderboard:"Κατάταξη", leaderHint:"Ταξινόμηση κατά συνολική απόδοση", leaderEmpty:"Δεν υπάρχουν παίκτες ακόμη — εγγραφείτε και πάρτε την πρώτη θέση.", leaderGuest:"Παίζετε ως επισκέπτης. Εγγραφείτε για να εμφανιστείτε στην κατάταξη.", leaderError:"Δεν ήταν δυνατή η φόρτωση της κατάταξης.", rank:"Θέση", player:"Παίκτης", value:"Αξία", returnPct:"Απόδοση", trades:"Συναλλαγές", you:"εσείς", playerCount:"{n} παίκτες", signUp:"Εγγραφή", logIn:"Σύνδεση", logOut:"Αποσύνδεση", createAccount:"Δημιουργία λογαριασμού", username:"Όνομα χρήστη", password:"Κωδικός", signUpSub:"Δημιουργήστε λογαριασμό για να αποθηκεύσετε την πρόοδό σας και να μπείτε στην κατάταξη.", signUpKeeps:"Το τρέχον χαρτοφυλάκιό σας σας ακολουθεί — τίποτα δεν χάνεται.", logInSub:"Καλώς ορίσατε ξανά. Συνδεθείτε για να συνεχίσετε.", haveAccount:"Έχετε ήδη λογαριασμό;", noAccount:"Χρειάζεστε λογαριασμό;", welcomeNew:"Καλώς ήρθατε, {name}! Είστε στην κατάταξη.", welcomeBack:"Καλώς ήρθατε ξανά, {name}.", loggedOut:"Αποσυνδεθήκατε. Παίζετε ως επισκέπτης.", confirmLogout:"Αποσύνδεση από {name};",
   tagline:"Εξασκηθείτε στις συναλλαγές κρυπτονομισμάτων με ζωντανά δεδομένα αγοράς και αξιολογήσεις ΤΝ — μηδενικό ρίσκο, πραγματικές δεξιότητες.",
   langTitle:"Γλώσσα", langHint:"Επιλέξτε τη γλώσσα της διεπαφής.",
   assetsTitle:"Νομίσματα προς παρακολούθηση", assetsHint:"Ενεργοποιήστε τα κρυπτονομίσματα που θέλετε να παρακολουθείτε και να συναλλάσσεστε.",
@@ -1123,6 +1226,7 @@ const S = {
   settings:null, assets:[], weights:null, defaults:null, thresholds:{},
   sort:{key:'composite',dir:-1}, view:'market', open:null, side:'BUY',
   manual:null, cycleSeconds:60, updatedAt:null, cycle:0, disconnected:false,
+  user:null,
   pfRange: localStorage.getItem('pfRange') || '24h',
   statMetric:null, statRange:'24h',
   drawerPriceRange:'24h', drawerScoreRange:'24h',
@@ -1130,6 +1234,11 @@ const S = {
 };
 
 const $ = s => document.querySelector(s);
+/* Asset names come from our own config, but display names are typed by users
+   and land in innerHTML on the leaderboard. The username rule already bars
+   angle brackets; this is the belt to that pair of braces. */
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 function money(v, dp) {
   if (v == null || !isFinite(v)) return '—';
   const a = Math.abs(v);
@@ -1390,6 +1499,7 @@ function enterApp() {
   setTimeout(() => $('#landing').classList.add('hide'), 460);
   $('#app').classList.remove('hide');
   requestAnimationFrame(() => $('#app').classList.add('ready'));
+  loadMe();
   refresh();
 }
 
@@ -1887,12 +1997,132 @@ async function drawStat() {
     `<span class="${sgn(delta)}">${(delta >= 0 ? '+' : '') + M.fmt(delta).replace('$-','-$')}</span>`;
 }
 
+/* ══ Account ════════════════════════════════════════════════════════════ */
+const Auth = {
+  mode: 'signup',   // 'signup' | 'login'
+
+  open(mode) {
+    this.mode = mode || (S.user && !S.user.is_guest ? 'login' : 'signup');
+    this.render();
+    $('#authWrap').classList.remove('hide');
+    $('#authErr').textContent = '';
+    $('#authForm').reset();
+    setTimeout(() => $('#authUser').focus(), 40);
+  },
+
+  close() { $('#authWrap').classList.add('hide'); },
+
+  render() {
+    const signup = this.mode === 'signup';
+    $('#authTitle').textContent = t(signup ? 'signUp' : 'logIn');
+    // A guest already has a portfolio, so say plainly that it carries over --
+    // otherwise signing up looks like it might wipe their progress.
+    $('#authSub').textContent = signup
+      ? (S.user && S.user.is_guest ? t('signUpKeeps') : t('signUpSub'))
+      : t('logInSub');
+    $('#authGo').textContent = t(signup ? 'createAccount' : 'logIn');
+    $('#authAltText').textContent = t(signup ? 'haveAccount' : 'noAccount');
+    $('#authSwap').textContent = t(signup ? 'logIn' : 'signUp');
+    $('#authPass').autocomplete = signup ? 'new-password' : 'current-password';
+  },
+
+  async submit(e) {
+    e.preventDefault();
+    const username = $('#authUser').value.trim();
+    const password = $('#authPass').value;
+    const err = $('#authErr');
+    err.textContent = '';
+    $('#authGo').disabled = true;
+    try {
+      await api(this.mode === 'signup' ? '/api/auth/signup' : '/api/auth/login', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ username, password }),
+      });
+      this.close();
+      S.histCache = {};
+      await loadMe();
+      await refresh();
+      toast(t(this.mode === 'signup' ? 'welcomeNew' : 'welcomeBack',
+              { name: S.user ? S.user.name : username }), true);
+    } catch (e2) {
+      err.textContent = e2.message;
+    } finally {
+      $('#authGo').disabled = false;
+    }
+  },
+
+  async logout() {
+    await api('/api/auth/logout', { method:'POST' });
+    S.histCache = {};
+    await loadMe();
+    await refresh();
+    toast(t('loggedOut'), true);
+  },
+};
+
+async function loadMe() {
+  try { S.user = (await api('/api/me')).user; }
+  catch { S.user = null; }
+  renderAccount();
+}
+
+function renderAccount() {
+  const btn = $('#acctBtn');
+  if (!S.user) { btn.classList.add('hide'); return; }
+  btn.classList.remove('hide');
+  btn.classList.toggle('guest', S.user.is_guest);
+  $('#acctName').textContent = S.user.is_guest ? t('signUp') : S.user.name;
+  btn.title = S.user.is_guest ? t('signUpSub') : t('logOut');
+}
+
+/* ══ Leaderboard ════════════════════════════════════════════════════════ */
+const MEDALS = ['🥇', '🥈', '🥉'];
+
+async function renderLeaders() {
+  const body = $('#leaderBody');
+  let d;
+  try { d = await api('/api/leaderboard'); }
+  catch { body.innerHTML = `<div class="lb-empty">${esc(t('leaderError'))}</div>`; return; }
+
+  $('#leaderCount').textContent = d.total_players
+    ? t('playerCount', { n: d.total_players }) : '';
+
+  if (!d.rows.length) {
+    body.innerHTML = `<div class="lb-empty">${esc(t('leaderEmpty'))}</div>`;
+    return;
+  }
+
+  const head = `<div class="lb-row head">
+    <div>${esc(t('rank'))}</div><div>${esc(t('player'))}</div>
+    <div class="lb-num">${esc(t('value'))}</div>
+    <div class="lb-num">${esc(t('returnPct'))}</div>
+    <div class="lb-num">${esc(t('trades'))}</div></div>`;
+
+  body.innerHTML = head + d.rows.map(r => {
+    const you = r.user_id === d.your_id;
+    const medal = r.rank <= 3 ? MEDALS[r.rank - 1] : r.rank;
+    return `<div class="lb-row${you ? ' you' : ''}">
+      <div class="lb-rank${r.rank <= 3 ? ' medal' : ''}">${medal}</div>
+      <div class="lb-name">${esc(r.name)}${you ? `<span class="youtag">${esc(t('you'))}</span>` : ''}</div>
+      <div class="lb-num">${money(r.total, 2)}</div>
+      <div class="lb-num ${sgn(r.return_pct)}">${pct(r.return_pct)}</div>
+      <div class="lb-num">${r.trade_count}</div>
+    </div>`;
+  }).join('');
+
+  // A guest is not ranked, so tell them why rather than showing an absence.
+  if (d.is_guest) {
+    body.innerHTML += `<div class="lb-empty">${esc(t('leaderGuest'))}</div>`;
+  }
+}
+
 /* ══ Views & data flow ══════════════════════════════════════════════════ */
 function setView(v) {
   S.view = v;
   $('#view-market').classList.toggle('hide', v !== 'market');
   $('#view-portfolio').classList.toggle('hide', v !== 'portfolio');
   $('#view-stat').classList.toggle('hide', v !== 'stat');
+  $('#view-leaders').classList.toggle('hide', v !== 'leaders');
   document.querySelectorAll('.tabs .btn').forEach(b =>
     b.classList.toggle('on', b.dataset.view === (v === 'stat' ? 'portfolio' : v)));
 }
@@ -1939,6 +2169,7 @@ async function refresh() {
   await loadOverview();
   if (S.view === 'portfolio') renderPortfolio();
   if (S.view === 'stat') drawStat();
+  if (S.view === 'leaders') renderLeaders();
 }
 
 function drawerBusy() {
@@ -1993,6 +2224,7 @@ document.querySelectorAll('.tabs .btn').forEach(b => {
   b.addEventListener('click', () => {
     setView(b.dataset.view);
     if (b.dataset.view === 'portfolio') renderPortfolio();
+    if (b.dataset.view === 'leaders') renderLeaders();
   });
 });
 $('#statBack').addEventListener('click', () => { setView('portfolio'); renderPortfolio(); });
@@ -2022,6 +2254,28 @@ $('#themeBtn').addEventListener('click', toggleTheme);
 $('#landTheme').addEventListener('click', toggleTheme);
 $('#setupBtn').addEventListener('click', showLanding);
 $('#brandBtn').addEventListener('click', showLanding);
+
+/* Account controls */
+$('#acctBtn').addEventListener('click', () => {
+  if (S.user && !S.user.is_guest) {
+    if (confirm(t('confirmLogout', { name: S.user.name }))) Auth.logout();
+  } else {
+    Auth.open('signup');
+  }
+});
+$('#authClose').addEventListener('click', () => Auth.close());
+$('#authForm').addEventListener('submit', e => Auth.submit(e));
+$('#authSwap').addEventListener('click', () => {
+  Auth.mode = Auth.mode === 'signup' ? 'login' : 'signup';
+  $('#authErr').textContent = '';
+  Auth.render();
+});
+$('#authWrap').addEventListener('click', e => {
+  if (e.target === $('#authWrap')) Auth.close();   // click the backdrop to dismiss
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !$('#authWrap').classList.contains('hide')) Auth.close();
+});
 $('#landGo').addEventListener('click', () => Landing.submit());
 $('#selAll').addEventListener('click', () => {
   Landing.followed = new Set(S.settings.all_assets.map(a => a.symbol)); Landing.render();
