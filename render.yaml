@@ -31,3 +31,22 @@ services:
       # "demo" (free, default) or "pro" -- they use different hosts and headers.
       - key: COINGECKO_PLAN
         value: demo
+      # Accounts, portfolios and leaderboard standings. Without this the app
+      # still runs, but falls back to a SQLite file on the instance's
+      # ephemeral disk, so every account is wiped on restart and on the
+      # 15-minute idle spin-down. Market data is unaffected either way -- it
+      # is regenerable and stays on the ephemeral disk deliberately.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: tt-trading-db
+          property: connectionString
+
+databases:
+  # Free Postgres EXPIRES 30 DAYS after creation, then is deleted after a
+  # 14-day grace period. Upgrade or export before then or every account and
+  # leaderboard standing goes with it.
+  - name: tt-trading-db
+    plan: free
+    region: frankfurt          # must match the web service
+    databaseName: tt_trading
+    user: tt_trading

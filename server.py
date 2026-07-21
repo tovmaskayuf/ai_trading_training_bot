@@ -11,20 +11,26 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+import accounts
 import config
 import db
 import engine
+import portfolio as pf
 import providers
 from providers import coingecko
 import settings
+import userstore
 from analytics import rating
 from trading import manual
+
+SESSION_COOKIE = "tt_session"
 
 log = logging.getLogger("server")
 
@@ -81,6 +87,45 @@ def _current_prices() -> dict[str, float]:
     return out
 
 
+# --- Identity --------------------------------------------------------------
+
+
+def _set_session(response: Response, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE, token,
+        max_age=userstore.SESSION_DAYS * 86_400,
+        httponly=True,        # not readable from JS, so XSS cannot lift it
+        samesite="lax",
+        # Render terminates TLS so production is always HTTPS, but marking the
+        # cookie secure over plain http would stop it being set at all locally.
+        secure=not _is_local(),
+        path="/",
+    )
+
+
+def _is_local() -> bool:
+    return not os.getenv("RENDER") and not os.getenv("DATABASE_URL")
+
+
+def current_user(request: Request) -> dict[str, Any] | None:
+    """The signed-in or guest user for this request, or None if neither."""
+    return userstore.user_for_session(request.cookies.get(SESSION_COOKIE))
+
+
+def require_user(request: Request, response: Response) -> dict[str, Any]:
+    """Resolve the caller, creating a guest on first visit.
+
+    Visitors trade before they ever sign up, so identity has to exist from the
+    first request rather than starting at a login wall.
+    """
+    user = current_user(request)
+    if user:
+        return user
+    guest = accounts.create_guest(settings.get()["starting_capital"])
+    _set_session(response, userstore.new_session(guest["id"]))
+    return guest
+
+
 def _range_cutoff(range_key: str) -> int | None:
     if range_key not in RANGES:
         raise HTTPException(400, f"Unknown range: {range_key}. "
@@ -107,9 +152,12 @@ async def get_settings() -> dict[str, Any]:
 
 
 @app.post("/api/settings")
-async def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
+async def save_settings(payload: dict[str, Any], request: Request,
+                        response: Response) -> dict[str, Any]:
     """Apply start-screen choices. Changing the starting capital resets the
-    portfolio to the new amount; language and asset selection never do."""
+    caller's own portfolio to the new amount; language and asset selection
+    never do."""
+    user = require_user(request, response)
     before = settings.get()
     try:
         after = settings.save(payload)
@@ -121,7 +169,7 @@ async def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
         and float(after["starting_capital"]) != float(before["starting_capital"])
     )
     if capital_changed or not before["initialized"]:
-        manual.reset(after["starting_capital"])
+        pf.reset(user["id"], after["starting_capital"])
 
     return {"ok": True, "settings": after, "portfolio_reset": capital_changed}
 
@@ -130,8 +178,10 @@ async def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.get("/api/overview")
-async def overview() -> dict[str, Any]:
+async def overview(request: Request, response: Response) -> dict[str, Any]:
     """Everything the main screen needs in one call."""
+    user = require_user(request, response)
+    held_now = {h["symbol"] for h in pf.holdings(user["id"])}
     assets = engine.STATE.get("assets") or {}
     prefs = settings.get()
 
@@ -149,7 +199,7 @@ async def overview() -> dict[str, Any]:
                 "symbol": symbol, "name": asset.name, "thesis": asset.thesis,
                 "source": asset.price_source,
                 "followed": symbol in followed,
-                "held": manual.holding_for(symbol) is not None,
+                "held": symbol in held_now,
                 "spark": [c["c"] for c in candles],
                 "price": snap.get("price"), "chg_24h": snap.get("chg_24h"),
                 "mcap": snap.get("mcap"), "rank": snap.get("rank"),
@@ -167,7 +217,7 @@ async def overview() -> dict[str, Any]:
     asset_rows = [
         {**a,
          "followed": a["symbol"] in followed_now,
-         "held": manual.holding_for(a["symbol"]) is not None}
+         "held": a["symbol"] in held_now}
         for a in assets.values()
     ]
 
@@ -189,11 +239,13 @@ async def overview() -> dict[str, Any]:
 
 
 @app.get("/api/asset/{symbol}")
-async def asset_detail(symbol: str) -> dict[str, Any]:
+async def asset_detail(symbol: str, request: Request,
+                       response: Response) -> dict[str, Any]:
     symbol = symbol.upper()
     if symbol not in config.BY_SYMBOL:
         raise HTTPException(404, f"Unknown symbol: {symbol}.")
 
+    user = require_user(request, response)
     asset = config.BY_SYMBOL[symbol]
     live = (engine.STATE.get("assets") or {}).get(symbol, {})
 
@@ -204,7 +256,7 @@ async def asset_detail(symbol: str) -> dict[str, Any]:
         "source": asset.price_source,
         "live": live,
         "detail": live.get("detail", {}),
-        "holding": manual.holding_for(symbol),
+        "holding": pf.holding_for(user["id"], symbol),
     }
 
 
@@ -285,28 +337,113 @@ async def asset_ratings(symbol: str, range: str = "24h") -> dict[str, Any]:
 # --- Portfolio -------------------------------------------------------------
 
 
+# --- Accounts --------------------------------------------------------------
+
+
+def _public_user(user: dict[str, Any]) -> dict[str, Any]:
+    """What the client is allowed to see. Never the hash, never the session."""
+    return {
+        "id": user["id"],
+        "name": user["display_name"],
+        "username": None if user.get("is_guest") else user["username"],
+        "is_guest": bool(user.get("is_guest")),
+    }
+
+
+@app.get("/api/me")
+async def me(request: Request, response: Response) -> dict[str, Any]:
+    return {"user": _public_user(require_user(request, response))}
+
+
+@app.post("/api/auth/signup")
+async def signup(payload: dict[str, Any], request: Request,
+                 response: Response) -> dict[str, Any]:
+    """Create an account. A guest keeps the portfolio it already built."""
+    username = str(payload.get("username", ""))
+    password = str(payload.get("password", ""))
+    existing = current_user(request)
+
+    try:
+        if existing and existing.get("is_guest"):
+            user = accounts.claim_account(existing["id"], username, password)
+        else:
+            user = accounts.create_user(
+                username, password, settings.get()["starting_capital"])
+            _set_session(response, userstore.new_session(user["id"]))
+    except accounts.AuthError as e:
+        raise HTTPException(400, str(e)) from None
+
+    return {"ok": True, "user": _public_user({**user, "display_name": user["display_name"]})}
+
+
+@app.post("/api/auth/login")
+async def login(payload: dict[str, Any], request: Request,
+                response: Response) -> dict[str, Any]:
+    try:
+        user = accounts.authenticate(
+            str(payload.get("username", "")), str(payload.get("password", "")))
+    except accounts.AuthError as e:
+        raise HTTPException(401, str(e)) from None
+
+    # Drop the guest session rather than leaving it resolvable.
+    userstore.end_session(request.cookies.get(SESSION_COOKIE))
+    _set_session(response, userstore.new_session(user["id"]))
+    return {"ok": True, "user": _public_user({**user, "is_guest": False})}
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request, response: Response) -> dict[str, Any]:
+    userstore.end_session(request.cookies.get(SESSION_COOKIE))
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/leaderboard")
+async def leaderboard(request: Request, response: Response,
+                      limit: int = 100) -> dict[str, Any]:
+    """Global standings. Everyone is marked to the same prices at read time."""
+    user = require_user(request, response)
+    rows = pf.leaderboard(_current_prices(), limit=max(1, min(limit, 500)))
+    mine = next((r for r in rows if r["user_id"] == user["id"]), None)
+    return {
+        "rows": rows,
+        "you": mine,
+        "your_id": user["id"],
+        "is_guest": bool(user.get("is_guest")),
+        "total_players": len(rows),
+    }
+
+
+# --- Portfolio -------------------------------------------------------------
+
+
 @app.get("/api/manual")
-async def manual_view() -> dict[str, Any]:
-    """The user's portfolio, marked to the latest prices."""
-    return manual.snapshot(_current_prices())
+async def manual_view(request: Request, response: Response) -> dict[str, Any]:
+    """The caller's own portfolio, marked to the latest prices."""
+    user = require_user(request, response)
+    return {**pf.snapshot(user["id"], _current_prices()),
+            "user": _public_user(user)}
 
 
 @app.get("/api/manual/history")
-async def manual_history(range: str = "24h") -> dict[str, Any]:
+async def manual_history(request: Request, response: Response,
+                         range: str = "24h") -> dict[str, Any]:
     """Portfolio value over time. Returns every metric column; the client
     chooses which one to chart."""
+    user = require_user(request, response)
     cutoff = _range_cutoff(range)
-    rows = db.manual_equity_series(cutoff)
-    return {"range": range, "points": rows}
+    return {"range": range, "points": pf.equity_series(user["id"], cutoff)}
 
 
 @app.post("/api/manual/trade")
-async def manual_trade(payload: dict[str, Any]) -> dict[str, Any]:
+async def manual_trade(payload: dict[str, Any], request: Request,
+                       response: Response) -> dict[str, Any]:
     """Execute a simulated buy or sell at the current live price.
 
     Price is taken server-side rather than from the client, so a stale page
     cannot fill at an old quote.
     """
+    user = require_user(request, response)
     symbol = str(payload.get("symbol", "")).upper()
     side = str(payload.get("side", "")).upper()
 
@@ -327,24 +464,27 @@ async def manual_trade(payload: dict[str, Any]) -> dict[str, Any]:
     ts = db.now_ms()
     try:
         if side == "BUY":
-            result = manual.buy(
-                symbol, price, ts,
+            result = pf.buy(
+                user["id"], symbol, price, ts,
                 usd=_opt_float(payload, "usd"),
                 qty=_opt_float(payload, "qty"),
             )
         else:
-            result = manual.sell(
-                symbol, price, ts,
+            result = pf.sell(
+                user["id"], symbol, price, ts,
                 qty=_opt_float(payload, "qty"),
                 fraction=_opt_float(payload, "fraction"),
             )
-    except manual.TradeError as e:
+    except pf.TradeError as e:
         raise HTTPException(400, str(e)) from None
 
     # Record the post-trade value immediately so charts show the step.
-    manual.record_equity(db.now_ms(), _current_prices())
+    prices = _current_prices()
+    pf.record_equity(user["id"], db.now_ms(), prices)
 
-    return {"ok": True, "trade": result, "portfolio": manual.snapshot(_current_prices())}
+    return {"ok": True, "trade": result,
+            "portfolio": {**pf.snapshot(user["id"], prices),
+                          "user": _public_user(user)}}
 
 
 def _opt_float(payload: dict[str, Any], key: str) -> float | None:
@@ -358,9 +498,15 @@ def _opt_float(payload: dict[str, Any], key: str) -> float | None:
 
 
 @app.post("/api/manual/reset")
-async def manual_reset() -> dict[str, Any]:
-    manual.reset()
-    return {"status": "reset", "capital": manual.starting_capital()}
+async def manual_reset(request: Request, response: Response) -> dict[str, Any]:
+    """Reset only the caller's own portfolio.
+
+    This used to reset the single shared portfolio for everyone, with no
+    authentication -- any visitor could wipe the board.
+    """
+    user = require_user(request, response)
+    pf.reset(user["id"])
+    return {"status": "reset", "capital": pf.starting_capital(user["id"])}
 
 
 # --- Ratings utilities -----------------------------------------------------

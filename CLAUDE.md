@@ -6,16 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **AI Crypto Trading and Training by TT** — a paper-trading trainer for 15
 cryptocurrencies. A 60-second polling engine collects live prices and computes
-a four-axis AI rating per asset; the user trades a virtual portfolio by hand
-through a Polymarket-styled web UI with an animated start screen, four
-languages, and time-range charts everywhere.
+a four-axis AI rating per asset; each visitor trades their own virtual
+portfolio by hand through a Polymarket-styled web UI with an animated start
+screen, five languages, time-range charts everywhere, optional accounts, and a
+global leaderboard.
 
 **There is no automated trading.** An earlier iteration had a bot that traded
 its own portfolio against the user's ("versus bot"); that was removed
 deliberately at the user's request. The engine only collects data and rates.
-`trading/strategy.py`, `trading/portfolio.py`, the bot's `positions`/`trades`/
-`equity` tables, and `tests/test_strategy.py` are gone — do not resurrect them.
-`db.MIGRATIONS` drops the old bot tables from any pre-existing database.
+`trading/strategy.py`, the bot's `positions`/`trades`/`equity` tables, and
+`tests/test_strategy.py` are gone — do not resurrect them. `db.MIGRATIONS`
+drops the old bot tables from any pre-existing database. (Note `portfolio.py`
+at the repo root is the *current* per-user portfolio module, unrelated to the
+deleted `trading/portfolio.py`.)
+
+**Every visitor has their own portfolio.** This was not always true: the app
+once served one shared portfolio, so any visitor's buy spent everyone's cash,
+anyone could liquidate anyone's position, and an unauthenticated reset wiped it
+for all of them. Do not reintroduce process-global portfolio state.
 
 ## Git workflow — commit and push as you go
 
@@ -45,19 +53,35 @@ migrated schema). Re-check `git status` before assuming your view is current;
 
 ## Environment
 
-Python 3.14 in a local venv. `requirements.txt` exists (fastapi, uvicorn,
-httpx). No pytest/ruff/black — the test files are **plain scripts** that print
-PASS/FAIL per assertion and exit non-zero on failure.
+Python 3.14 in a local venv. `requirements.txt`: fastapi, uvicorn, httpx,
+`psycopg[binary]`. No pytest/ruff/black — the test files are **plain scripts**
+that print PASS/FAIL per assertion and exit non-zero on failure.
+
+**Node is required for `test_frontend.py`** (`brew install node`). Without it
+that suite fails loudly rather than skipping, which is deliberate.
 
 ```bash
 .venv/bin/python tests/test_indicators.py    # indicator correctness
-.venv/bin/python tests/test_manual.py        # portfolio accounting + settings guards
+.venv/bin/python tests/test_manual.py        # legacy portfolio accounting
+.venv/bin/python tests/test_portfolio.py     # per-user portfolios + leaderboard
+.venv/bin/python tests/test_frontend.py      # JS parses, i18n parity, DOM sanity
 .venv/bin/python -m uvicorn server:app --port 8000   # run everything
 ```
 
-Always run from the project root. Tests point `config.DB_PATH` at a scratch
-temp file **before** importing `db`, so they never touch real state — preserve
-that pattern in new tests.
+`test_portfolio.py` runs against whichever backend is configured, so it doubles
+as the Postgres check:
+`DATABASE_URL=postgresql://… .venv/bin/python tests/test_portfolio.py`.
+
+Always run from the project root. Tests point `config.DB_PATH` (and
+`config.BASE_DIR` for the user store) at a scratch temp file **before**
+importing `db`/`userstore`, so they never touch real state — preserve that
+pattern in new tests.
+
+**Never ship frontend changes without running `test_frontend.py`.** A release
+once shipped a dashboard whose markup did not parse: an unclosed `<noscript>`
+swallowed the entire body, so the server stayed healthy and every API check
+passed while the page was blank. A brace-balance count was treated as proof the
+file was valid. It is not — only `node --check` and an HTML parse are.
 
 **The directory name contains `}{`** (`ai_trading}{bot`). Braces break
 unquoted shell paths — always quote it. This is why the GitHub repo is named
@@ -100,24 +124,49 @@ candles); its candle endpoint takes a time range, not a `limit`.
 
 CoinGecko `rank` is computed **within our 15-asset basket**, not globally.
 
-### Storage (`db.py`)
+### Storage — two stores, on purpose
 
-SQLite in WAL mode; epoch-millisecond timestamps everywhere. Tables:
-`candles` (1h and 1d rows distinguished by `interval`), `snapshots`,
-`ratings`, `manual_holdings`, `manual_trades`, `manual_equity`, `meta`.
-`manual_equity` is the portfolio-over-time series behind every chart — one row
-per cycle plus one per trade, **never pruned**. `manual_equity_series()`
-downsamples by keeping the *last* row per time bucket (right for value curves;
-averaging would smooth away the moves). `prune()` trims only
-`snapshots`/`ratings` past 90 days.
+**`db.py` — market data, ephemeral.** SQLite in WAL mode; epoch-millisecond
+timestamps everywhere. Tables: `candles` (1h and 1d rows distinguished by
+`interval`), `snapshots`, `ratings`, `meta`. `prune()` trims only
+`snapshots`/`ratings` past 90 days. This lives on the instance's disk and is
+**expected to be lost on restart** — it regenerates from the providers in
+about 3.5 seconds, so durability buys nothing here.
+
+**`userstore.py` — accounts and portfolios, durable.** Postgres when
+`DATABASE_URL` is set, otherwise its own SQLite file (`data/users.db`) so local
+development needs no database server. Tables: `users`, `sessions`,
+`portfolios`, `holdings`, `user_trades`, `user_equity`. Both backends speak
+`ON CONFLICT … DO UPDATE`, which is what lets one set of statements serve both;
+every difference is confined to `_Dialect`. Statements are written with `?` and
+converted to `%s` for psycopg — **escape `%` before substituting `?`**, or a
+literal percent becomes a placeholder.
+
+`_split_statements()` strips `--` comments before splitting on `;`, because a
+semicolon *inside a comment* otherwise cuts it in half and the remainder parses
+as SQL. That was a real bug.
 
 ### Engine (`engine.py`)
 
-One asyncio loop: fetch → snapshot → rate → `manual.record_equity` → publish
-to SSE subscribers. Failure in any provider degrades that cycle rather than
-killing the service. `bootstrap()` backfills 300×1h and 365×1d candles on
-first run. The rating's `holding` flag comes from `manual.holding_for()` — the
-*user's* holdings — which is what makes the HOLD signal mean "you own this."
+One asyncio loop: fetch → snapshot → rate → `portfolio.record_equity_all` →
+publish to SSE subscribers. Failure in any provider degrades that cycle rather
+than killing the service.
+
+There is **no separate bootstrap pass**: cycle 0 already refreshes both candle
+intervals (`0 % KLINE_EVERY == 0` and `0 % DAILY_EVERY == 0`), so backfilling
+first ran the same ~30 fetches twice and left the dashboard empty for minutes
+on every cold start. `refresh_candles()` fetches concurrently behind a
+semaphore (`CANDLE_CONCURRENCY`) and records failures in
+`STATE["_candle_errors"]`, surfaced by `/api/health` — a silent candle failure
+empties momentum, risk *and* relative while prices keep flowing, which looks
+like a half-broken UI with nothing to explain it.
+
+`STATE["running"]` is set when the loop starts, not after the first successful
+cycle, so health does not report the engine as down throughout warm-up.
+
+The rating's `holding` flag is fixed at `False`: ratings are shared by every
+viewer, so they cannot depend on whose holdings they are. Each response stamps
+that caller's own `held` flags at read time in `/api/overview`.
 
 ### Rating engine (`analytics/`)
 
@@ -138,13 +187,44 @@ BUY); `NEUTRAL` = flat. Do not feed `HOLD` back into the carry-forward
 condition in `signal_for` — that makes it self-sustaining and `NEUTRAL`
 unreachable (past bug).
 
-### Portfolio (`trading/manual.py`)
+### Portfolio (`portfolio.py`)
 
-Holdings model with **average cost basis** (fees included in basis), not
-discrete lots. Buys interpret `usd` as all-in (cost + fee). Guards raise
-`TradeError` with user-facing, properly punctuated messages — the server
-passes them straight through as HTTP 400 detail. A flat round-trip must lose
-exactly the fees; `tests/test_manual.py` asserts this.
+Per-user. Holdings model with **average cost basis** (fees included in basis),
+not discrete lots. Buys interpret `usd` as all-in (cost + fee). Guards raise
+`TradeError` with user-facing, properly punctuated messages — the server passes
+them straight through as HTTP 400 detail. A flat round-trip must lose exactly
+the fees; `tests/test_portfolio.py` asserts this.
+
+Every trade writes the holding, the trade row **and the cash balance inside one
+transaction**. Writing cash afterwards leaves a window where a crash books the
+asset without the payment — free money on a buy, vanished proceeds on a sell.
+
+`snapshot()` aggregates trade totals **in SQL**, not by pulling rows into
+Python: it runs once per cycle per connected client, so a long history would
+otherwise scale with history × viewers. `record_equity_all()` writes one equity
+point for every portfolio in a single bulk pass for the same reason.
+
+`leaderboard()` marks every player to the **same live prices at read time**
+rather than reading stored equity rows — otherwise whoever traded most recently
+would rank on the freshest valuation. Guests are excluded.
+
+`trading/manual.py` is the retired single-portfolio version, kept only because
+`tests/test_manual.py` still covers its accounting.
+
+### Accounts (`accounts.py`)
+
+PBKDF2-HMAC-SHA256 from the stdlib; the iteration count is stored in the hash
+so it can be raised later without invalidating existing ones. Comparison is
+constant-time.
+
+A login for an **unknown username still verifies against a cached real-cost
+dummy hash**. A cheap placeholder returns in ~0ms against ~33ms for a wrong
+password, and that difference enumerates valid accounts. Measured at 1.00x
+after the fix — do not "optimise" it away.
+
+First-time visitors get a **guest** row (`is_guest = 1`, unusable password)
+so they can trade before signing up; `claim_account()` converts that same row
+in place so their portfolio carries over. Guests are kept off the leaderboard.
 
 ### Server (`server.py`)
 
@@ -155,20 +235,42 @@ at "now". Trade prices are resolved **server-side** so a stale tab cannot
 fill at an old quote. `/api/overview` re-stamps `followed`/`held` flags at
 read time because the engine's copy is up to a minute stale.
 
+`require_user()` resolves an HttpOnly session cookie and creates a guest on
+first visit. **Every portfolio-mutating endpoint is scoped to that caller** —
+`/api/manual/reset` once wiped the single shared portfolio for everyone, with
+no authentication at all.
+
+`/` sets `Cache-Control: no-cache, must-revalidate`. The whole app is one file,
+so without it browsers apply heuristic freshness and pin users to an old build
+across deploys — including a broken one, which is how a bad release once
+survived being reverted.
+
 ### Frontend (`static/dashboard.html`)
 
 One self-contained file, no CDN, no build step: animated landing (language
-pills, 15 asset switches, capital input), Markets and Portfolio views, a
-clickable stat sub-page per tile (Cash / Invested / Unrealized / Realized /
-Fees), buy/sell drawer, SSE live updates, light/dark themes.
+pills, 15 asset switches, capital input), Markets / Portfolio / Leaderboard
+views, a clickable stat sub-page per tile (Cash / Invested / Unrealized /
+Realized / Fees), buy/sell drawer, account modal, SSE live updates, light/dark
+themes.
 
-- **i18n**: `I18N` dict with `en`/`hy`/`uk`/`es`/`el`, 130 keys each — keep
-  all five languages in exact key parity when adding strings (there is a JSC
-  parity-check pattern in repo history). `t(key, vars)` does `{var}`
+- **i18n**: `I18N` dict with `en`/`hy`/`uk`/`es`/`el`, 160 keys each — keep
+  all five languages in exact key parity when adding strings.
+  `tests/test_frontend.py` checks this by **evaluating the object in node**,
+  not by regex: keys inside translated prose ("no hay jugadores: …") produced
+  false mismatches when it was done textually. `t(key, vars)` does `{var}`
   templating. Russian was **removed at the user's request** (replaced by
   Ukrainian, with Greek added) — do not re-add it. The boot path falls back to
   `en` when a saved language code no longer exists. The brand name "AI Crypto
   Trading and Training by TT" is never translated.
+- **Crawler summary**: `#seo-summary` is plain markup hidden by a `.js` class
+  that an inline `<head>` script stamps before first paint. It must **not** be
+  wrapped in `<noscript>` — HTML-to-text converters, including AI browsing
+  tools, discard noscript content along with scripts, so the page read as an
+  empty shell. It must also not be `display:none` by default, which would hide
+  it from the very readers it exists for.
+- **User-supplied text is escaped** with `esc()` before reaching `innerHTML`.
+  The username charset bars angle brackets, but display names should not rest
+  on a single validator.
 - **Landing state**: `Landing.show()` reads saved settings once per visit;
   `Landing.render()` must never re-read them — it re-runs on every language
   switch and after Select All / Clear, and re-reading silently reverts the
@@ -196,10 +298,16 @@ presented as "No Data for every coin except one" on a default-region (Oregon)
 deployment. Render regions are immutable after creation: applying the fix
 means deleting the service and deploying the blueprint again.
 
-Other free-tier realities: instance sleeps when idle, disk is ephemeral
-(portfolio resets on restart), and the app keeps **one portfolio per
-instance** — no user accounts. Per-visitor portfolios are the known next step
-if a shared public instance is wanted. A claude.ai Artifact cannot host this:
+**A Postgres database is required for accounts to persist.** `render.yaml`
+provisions `tt-trading-db` (free plan, Frankfurt) and injects `DATABASE_URL`.
+Without it the app still runs, but the user store falls back to SQLite on the
+ephemeral disk and every account, portfolio and leaderboard standing is wiped
+on restart. **Free Render Postgres expires 30 days after creation** and is
+deleted after a 14-day grace period — upgrade or export before then.
+
+Other free-tier realities: instance sleeps when idle, and the market-data disk
+is ephemeral (candles re-backfill on every cold start, ~3.5s). A claude.ai
+Artifact cannot host this:
 the artifact CSP blocks external fetches (no network capability on this
 account), so live prices are unreachable from an artifact page.
 
@@ -216,4 +324,15 @@ account), so live prices are unreachable from an artifact page.
   cadence does not fix it. Prices are unaffected (Binance/Hyperliquid carry
   them) but `mcap`/`rank` stay `None`, so the Structure axis scores on volume
   trend and spread alone. The fix is a free CoinGecko demo API key passed as
-  an env var, not a cadence change.
+  an env var (`COINGECKO_API_KEY`), not a cadence change. A *wrong* key is
+  loud — 401 `error_code 10002`; a *missing* one is silent, which is why
+  `/api/health` reports `coingecko_auth`.
+- **Binance klines have failed on Render while `/ticker/24hr` kept working.**
+  Presented as prices and market cap flowing while momentum, risk and relative
+  sat empty for all 14 Binance-sourced assets, with only HYPE fully rated —
+  those three axes need candles. It cleared on the next restart and the cause
+  was never proven; the concurrent `refresh_candles` burst against a shared
+  Render IP is the main suspect. `/api/health` now reports `candle_errors` and
+  `candles_stored`, so next time the error is visible rather than log-only.
+  **This is not the geo-block**: under a geo-block prices fall back to
+  CoinGecko and get flagged `stale`, and none were.

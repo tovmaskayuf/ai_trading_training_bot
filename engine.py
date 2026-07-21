@@ -18,12 +18,17 @@ from typing import Any, Callable
 
 import config
 import db
+import portfolio
 import providers
 import settings
+import userstore
 from analytics import indicators as ind
 from analytics import rating
 from providers import coingecko
-from trading import manual
+
+# Recording equity is one bulk pass, but it still grows with player count.
+# Warn rather than fail so the limit is visible before it becomes a stall.
+EQUITY_SLOW_WARN = 500
 
 log = logging.getLogger("engine")
 
@@ -184,7 +189,10 @@ async def run_cycle(cycle: int) -> None:
     for symbol in config.SYMBOLS:
         cs = candles.get(symbol, [])
         prev = db.latest_rating(symbol)
-        holding = manual.holding_for(symbol) is not None
+        # Ratings are shared by every viewer, so they cannot depend on whose
+        # holdings these are. The signal is now the market view; each request
+        # stamps that caller's own `held` flag in /api/overview.
+        holding = False
         try:
             r = rating.rate_asset(
                 symbol, cs, market.get(symbol, {}), book.get(symbol),
@@ -207,7 +215,8 @@ async def run_cycle(cycle: int) -> None:
             "thesis": asset.thesis,
             "source": asset.price_source,
             "followed": symbol in followed,
-            "held": holding,
+            # Placeholder: re-stamped per caller at read time.
+            "held": False,
             # Last 48h of closes, for the inline sparkline in the grid.
             "spark": [round(c["c"], 8) for c in cs[-48:]],
             "price": p.get("price"),
@@ -224,7 +233,10 @@ async def run_cycle(cycle: int) -> None:
     # --- Record portfolio value --------------------------------------------
     price_map = {s: p["price"] for s, p in prices.items() if p.get("price")}
     try:
-        manual.record_equity(ts, price_map)
+        n = portfolio.record_equity_all(ts, price_map)
+        if n > EQUITY_SLOW_WARN:
+            log.warning("recorded equity for %d portfolios; consider moving "
+                        "this off the cycle if it keeps growing", n)
     except Exception as e:
         log.exception("equity recording failed")
         errors.append(f"Equity history: {e}")
@@ -248,7 +260,7 @@ async def loop(stop: Callable[[], bool] | None = None) -> None:
     """Run until `stop()` returns True (or forever)."""
     db.connect()
     db.prune()
-    manual.cash()  # seed starting capital on first run
+    userstore.connect()  # create the account/portfolio schema on first run
 
     # Logged because a key that failed to load looks exactly like an ordinary
     # rate limit from the outside -- 429s with no hint that auth never applied.
