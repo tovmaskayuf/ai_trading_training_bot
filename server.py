@@ -454,4 +454,10 @@ async def index() -> FileResponse:
     path = config.STATIC_DIR / "dashboard.html"
     if not path.exists():
         raise HTTPException(404, "dashboard.html not found")
-    return FileResponse(path)
+    # The whole app is this one file, so a cached copy pins the user to an old
+    # build across deploys -- including a broken one, which is exactly how a bad
+    # release survived being reverted. Without Cache-Control browsers apply
+    # their own heuristic freshness and can hold it for hours. "no-cache" still
+    # allows the etag revalidation below, so an unchanged file costs a 304
+    # rather than a re-download.
+    return FileResponse(path, headers={"Cache-Control": "no-cache, must-revalidate"})
