@@ -38,11 +38,13 @@ Repository: `tovmaskayuf/ai_trading_training_bot` on GitHub (**public**), branch
 on the redirect.
 
 - Commit when a module, fix, or coherent feature slice works — not per file.
-- Run the suites covering what you touched; run all five before anything that
-  crosses module boundaries. `analytics/` → `test_indicators.py`;
-  `portfolio.py`/`accounts.py`/`userstore.py` → `test_portfolio.py`;
-  `admin.py` → `test_admin.py`; `static/dashboard.html` → `test_frontend.py`;
-  `settings.py`/`trading/manual.py` → `test_manual.py`.
+- Run the suites covering what you touched, and run **all** of `tests/` before
+  anything that crosses module boundaries. `analytics/` →
+  `test_indicators.py`; `portfolio.py`/`accounts.py`/`userstore.py` →
+  `test_portfolio.py`; `admin.py` → `test_admin.py`;
+  `static/dashboard.html` → `test_frontend.py`;
+  `settings.py`/`trading/manual.py` → `test_manual.py`;
+  `providers/base.py`/`engine.py` cadence → `test_ratelimit.py`.
 - Subject: imperative, under ~72 chars. Body: explain **why** — the constraint
   or upstream quirk that motivated the change. Match existing commits.
 - Never commit `.venv/`, `data/`, `*.log`, or `.claude/settings.local.json` —
@@ -68,6 +70,7 @@ that suite fails loudly rather than skipping, which is deliberate.
 .venv/bin/python tests/test_manual.py        # legacy portfolio accounting
 .venv/bin/python tests/test_portfolio.py     # per-user portfolios + leaderboard
 .venv/bin/python tests/test_admin.py         # block / delete / reset + no password leak
+.venv/bin/python tests/test_ratelimit.py     # no retry on 418/429, host cooldowns
 .venv/bin/python tests/test_frontend.py      # JS parses, i18n parity, DOM sanity
 .venv/bin/python -m uvicorn server:app --port 8000   # run everything
 ```
