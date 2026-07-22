@@ -20,6 +20,18 @@
      be an ordinary element rather than : HTML-to-text converters,
      including AI browsing tools, discard noscript content along with scripts. -->
 <script>document.documentElement.className += ' js';</script>
+<!-- Saved layout override, applied before first paint for the same reason as
+     the class above. The viewport meta especially has to be right on the first
+     layout: setting it after paint makes the whole page visibly re-flow and
+     re-scale in front of the user. Reads localStorage directly because the
+     main script has not run yet -- it is one key, kept in step with
+     applyLayout(). -->
+<script>try {
+  var _l = localStorage.getItem('layout');
+  if (_l === 'mobile') document.documentElement.className += ' force-mobile';
+  else if (_l === 'desktop') document.querySelector('meta[name=viewport]')
+    .setAttribute('content', 'width=1100');
+} catch (e) {}</script>
 <!-- Same TT mark as the landing logo, inlined so there is no second request
      and no separate asset file to keep in sync. -->
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2048%2048'%3E%3Cdefs%3E%3ClinearGradient%20id='g'%20x1='0'%20y1='0'%20x2='1'%20y2='1'%3E%3Cstop%20offset='0%25'%20stop-color='%232a78d6'/%3E%3Cstop%20offset='100%25'%20stop-color='%231baf7a'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect%20width='48'%20height='48'%20rx='13'%20fill='url%28%23g%29'/%3E%3Crect%20x='8'%20y='17'%20width='14'%20height='4.5'%20rx='2'%20fill='%23fff'%20opacity='.8'/%3E%3Crect%20x='12.75'%20y='17'%20width='4.5'%20height='17'%20rx='2'%20fill='%23fff'%20opacity='.8'/%3E%3Crect%20x='26'%20y='9.5'%20width='14'%20height='4.5'%20rx='2'%20fill='%23fff'/%3E%3Crect%20x='30.75'%20y='9.5'%20width='4.5'%20height='17'%20rx='2'%20fill='%23fff'/%3E%3C/svg%3E">
@@ -700,6 +712,39 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
   .brand .bt { font-size:12.5px; }
   .hero .big { font-size:28px; }
 }
+
+/* ── Manual layout override (the Layout button in the header) ───────────
+   These repeat the two blocks above rather than sharing them, because a
+   media query cannot be OR-ed with a class selector: `@media` asks how wide
+   the viewport is, `.force-mobile` asks what the user picked, and no single
+   rule can ask both. They must be kept in step -- a change above needs the
+   same change here.
+
+   Note there is no `.force-desktop` counterpart. Nothing CSS can do makes a
+   390px phone show a desktop layout; that direction is the viewport meta
+   swap in applyLayout(), not a stylesheet. */
+html.force-mobile { --mobile-w:430px; }
+html.force-mobile .header-gap { flex:0 0 0; }
+html.force-mobile .hide-sm { display:none !important; }
+html.force-mobile main { padding:14px; }
+html.force-mobile header { padding:11px 14px; }
+html.force-mobile .brand .bt { font-size:12.5px; }
+html.force-mobile .hero .big { font-size:28px; }
+
+/* Narrowing the document is what actually makes the override legible on a
+   desktop: hiding a few elements at 1400px still reads as the desktop page
+   with gaps in it. The column width *is* the mobile layout. Only applied
+   where there is width to give back -- on a real phone the media query above
+   is already in force and this would just add two stray border lines. */
+@media (min-width:761px) {
+  html.force-mobile body { max-width:var(--mobile-w); margin-inline:auto;
+    min-height:100vh; border-inline:1px solid var(--border); }
+  /* The drawer is position:fixed, so it measures against the window and not
+     that column -- left alone it opens 560px wide against the far edge of the
+     screen, visually detached from the page it belongs to. */
+  html.force-mobile .drawer { width:min(var(--mobile-w),100vw);
+    right:max(0px, calc((100vw - var(--mobile-w)) / 2)); }
+}
 </style>
 </head>
 <body>
@@ -833,6 +878,7 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
   <button class="btn acct" id="acctBtn"><span id="acctName"></span></button>
   <select class="lang-sel" id="langSel" aria-label="Language"></select>
   <button class="btn icon" id="themeBtn" title="Theme">◐</button>
+  <button class="btn icon" id="layoutBtn" title="Layout">◫</button>
   <button class="btn icon" id="setupBtn" title="Setup">⚙</button>
 </header>
 

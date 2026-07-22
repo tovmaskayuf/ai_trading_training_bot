@@ -113,6 +113,20 @@ def main() -> None:
                 check("every t('key') literal is defined", not undef_lit,
                       f"undefined={undef_lit}")
 
+    # --- No native dialogs ------------------------------------------------
+    # A browser offers "prevent this page from creating additional dialogs"
+    # after a couple of them, and once accepted alert/confirm/prompt stop
+    # working for the rest of the session. confirm() then returns false, which
+    # merely fails safe, but prompt() returns null -- so an admin password
+    # reset silently does nothing with no error to show. Use Ask.open().
+    code = "\n".join(script_blocks(html))
+    code = re.sub(r"/\*.*?\*/", "", code, flags=re.S)          # block comments
+    code = re.sub(r"^\s*//.*$", "", code, flags=re.M)          # line comments
+    for fn in ("alert", "confirm", "prompt"):
+        hits = re.findall(rf"(?<![.\w$]){fn}\s*\(", code)
+        check(f"no native {fn}() in the dashboard", not hits,
+              f"{len(hits)} call(s)")
+
     # --- Structure --------------------------------------------------------
     # Comments discuss these tags by name, so count only real markup.
     markup = re.sub(r"<!--.*?-->", "", html, flags=re.S)

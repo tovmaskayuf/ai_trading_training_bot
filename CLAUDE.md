@@ -387,6 +387,13 @@ live updates, light/dark themes.
   tools, discard noscript content along with scripts, so the page read as an
   empty shell. It must also not be `display:none` by default, which would hide
   it from the very readers it exists for.
+- **No native `alert` / `confirm` / `prompt`.** Browsers offer "prevent this
+  page from creating additional dialogs" after a couple of them, and once a
+  user accepts, all three stop working for the session. `confirm()` then
+  returns false, which merely fails safe, but `prompt()` returns null -- so the
+  admin password reset silently did nothing. Use `Ask.open()`, which returns a
+  promise and supports an optional input. `tests/test_frontend.py` fails if any
+  native dialog reappears.
 - **User-supplied text is escaped** with `esc()` before reaching `innerHTML`.
   The username charset bars angle brackets, but display names should not rest
   on a single validator.
