@@ -25,6 +25,10 @@ data/
 .env.*
 !.env.example
 
+# Database dumps. Every account's PBKDF2 password hash is in here, the backup
+# tool writes into the working directory by default, and this repo is public.
+userstore-backup-*.json
+
 # Claude Code local settings (machine-specific)
 .claude/settings.local.json
 

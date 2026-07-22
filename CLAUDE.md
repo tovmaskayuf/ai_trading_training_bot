@@ -75,6 +75,7 @@ that suite fails loudly rather than skipping, which is deliberate.
 .venv/bin/python tests/test_ratelimit.py     # no retry on 418/429, host cooldowns
 .venv/bin/python tests/test_maintenance.py   # retention: guest purge, equity prune
 .venv/bin/python tests/test_concurrency.py   # no lost updates, rollback isolation
+.venv/bin/python tests/test_settings.py      # settings are on the DURABLE store
 .venv/bin/python tests/test_frontend.py      # JS parses, i18n parity, DOM sanity
 .venv/bin/python -m uvicorn server:app --port 8000   # run everything
 ```
@@ -88,6 +89,13 @@ double as the Postgres check:
 `test_concurrency.py` in particular creates accounts it does not clean up and
 inserts ~160k equity rows to make its throughput comparison meaningful, which
 is not something to spend on the free plan's 1 GB ceiling.
+
+`test_settings.py` and `test_manual.py` are the exceptions: both pin themselves
+to scratch SQLite **unconditionally**, popping `DATABASE_URL` before importing
+`userstore` (which reads it at import time). Every other suite creates
+uniquely-tagged rows; these two write the process-global settings singleton, so
+running them against a shared database would overwrite the live
+`starting_capital` — and leave it overwritten if an assertion raised.
 
 **Running `test_concurrency.py` against Postgres is not optional before
 trusting a change to the storage layer.** `DIALECT.for_update` is an empty
@@ -167,13 +175,41 @@ Binance" breaks on HYPE specifically.
 ### Settings (`settings.py`)
 
 Start-screen choices — `followed` assets, `starting_capital`, `language` —
-stored as one JSON blob in the `meta` table. `settings.save()` validates
-(capital $100–$10M, followed ⊆ registry and non-empty, language in
-`config.SUPPORTED_LANGUAGES`) and always stamps `initialized=True`. **Changing
-`starting_capital` resets the portfolio** (`server.save_settings` compares
-before/after); changing language or followed assets never does. The engine
-tracks and rates **all 15** regardless of selection — `followed` only gates the
-UI and trade permission — so switching an asset back on has full history.
+stored as one JSON blob under a single key in **`userstore.app_meta`**, the
+durable store. `settings.save()` validates (capital $100–$10M, followed ⊆
+registry and non-empty, language in `config.SUPPORTED_LANGUAGES`) and always
+stamps `initialized=True`. **Changing `starting_capital` resets the caller's
+portfolio** (`server.save_settings` compares before/after); changing language
+or followed assets never does. The engine tracks and rates **all 15**
+regardless of selection — `followed` only gates the UI and trade permission —
+so switching an asset back on has full history.
+
+**They live in the durable store because putting them on the ephemeral one
+destroyed player data.** Until 2026-07-22 the blob was in `db.meta`, on the
+disk that is wiped by every restart and idle spin-down. Two failures came out
+of that, and the second is the reason this paragraph exists:
+
+- `starting_capital` reverted to the $100k default, silently reseeding every
+  new visitor at a number nobody chose — it is read when an account is created
+  at `server.py:150`, `:399` and `:426`.
+- `initialized` reverted to `False`, and `save_settings` used to read
+  `if capital_changed or not before["initialized"]`. The start screen renders
+  on **every** page load and always posts back the capital it was prefilled
+  with, so after any restart the first returning player to click through it had
+  their portfolio reset — while the response still said
+  `portfolio_reset: false`. The condition is now `if capital_changed:` alone.
+  Nothing needed the other term: a new account is already seeded at the
+  configured capital when it is created. **Do not reintroduce it.**
+
+`initialized` is now a pure UI flag: it decides whether the start-screen button
+reads "Enter" or "Launch" (`static/dashboard.html:1774`). Nothing else reads it.
+
+`settings.adopt_legacy()` runs once at startup to carry a pre-existing blob
+across from `db.meta`. It is a one-shot, not a fallback inside `get()` —
+`get()` sits on `require_user`, `/api/overview`, `/api/trade` and every engine
+cycle, and a read-path fallback would add a permanent ephemeral-store hit to
+serve a condition true for at most one deployment. Safe to delete once every
+deployment has booted on this code.
 
 ### Providers (`providers/`)
 
@@ -719,12 +755,81 @@ Without it the app still runs, but the user store falls back to SQLite on the
 ephemeral disk and every account, portfolio and leaderboard standing is wiped
 on restart. **Free Render Postgres expires 30 days after creation** and is
 deleted after a 14-day grace period — upgrade or export before then.
-`tools/backup_userstore.py` is the export: it dumps `users`, `portfolios`,
-`holdings`, `user_trades` and `user_equity` to JSON through psycopg, so it
-needs no `pg_dump` on the machine running it. Point it at the **External**
-connection string; the internal one only resolves inside Render's network.
-It skips `sessions` on purpose — live tokens, self-expiring, no upside to
-writing them to disk.
+`tools/backup_userstore.py` is the export: it dumps `app_meta`, `users`,
+`portfolios`, `holdings`, `user_trades` and `user_equity` to JSON through
+psycopg, so it needs no `pg_dump` on the machine running it. Point it at the
+**External** connection string; the internal one only resolves inside Render's
+network. It skips `sessions` on purpose — live tokens, self-expiring, no upside
+to writing them to disk. The file is written `0600` with `O_EXCL`; it holds
+every account's PBKDF2 hash and `.gitignore` covers `userstore-backup-*.json`
+because this repo is public.
+
+`GET /api/admin/export` serves the same dump to a logged-in admin, so the
+routine monthly backup needs nothing but a browser. The CLI tool is what you
+want when the app is down, not deployed, or pointed at the wrong database — it
+is standalone and does not import `userstore` for exactly that reason, which is
+why `userstore.EXPORT_TABLES` and the tool's `TABLES` are two copies that must
+be kept in step. **That endpoint returns password hashes deliberately**: a
+restore that dropped them would lock every player out. It does not contradict
+the rule that passwords are never revealed — `list_players()` and
+`player_detail()` still return `password: None`, because those feed a UI and a
+hash is not a password.
+
+### Rotating the expired Postgres
+
+Roughly monthly. Nothing in the app warns you, so put the expiry in a calendar.
+
+**Before it expires.** Take a backup — `/api/admin/export` in the browser, or
+`DATABASE_URL='…external…' .venv/bin/python tools/backup_userstore.py --out ~/backups`.
+Sanity-check the printed row counts: `users: 0` means you pointed at the wrong
+database, not that nobody signed up.
+
+**Rotate, dashboard first, every name identical.** Delete the expired
+`tt-trading-db`, create a new Postgres with the **same** name, region
+`frankfurt`, `databaseName: tt_trading`, user `tt_trading`. Keeping the name is
+what lets `render.yaml` stay untouched and `fromDatabase` re-bind itself. **Do
+not edit `render.yaml` or rename the service during a rotation** — a blueprint
+sync against a mismatched name forks the deployment into a second service, and
+env vars do not carry across a fork. That has happened here.
+
+**Let it boot once against the empty database.** That is what runs
+`_init_schema()` and creates the tables. `restore_userstore.py` does **not**
+create schema and will stop with a message telling you to do this.
+
+**Restore.** That first boot also creates rows — `ensure_master()` mints
+`master` at `id = 1`, colliding with the backup's `id = 1`, and any traffic
+mints guests. So the restore always runs with `--wipe`, ideally before the URL
+is shared around:
+
+```bash
+DATABASE_URL='…new external…' .venv/bin/python tools/restore_userstore.py \
+    ~/backups/userstore-backup-YYYYmmdd-HHMMSS.json --wipe --dry-run
+```
+
+Read the target-vs-backup comparison it prints — **a target with more users
+than the backup means you are pointed at production** — then re-run without
+`--dry-run` and type the database name at the prompt. It refuses a non-empty
+target without `--wipe`, and the whole thing is one transaction, so a failure
+part-way leaves the database exactly as it was.
+
+The backup's original master row comes back with its old hash; the next boot's
+`ensure_master()` re-applies `MASTER_PASSWORD` over it, which is idempotent.
+
+**Re-apply the two `sync: false` env vars by hand**: `COINGECKO_API_KEY` and
+`MASTER_PASSWORD`. A blueprint sync never supplies them, and deploying without
+`MASTER_PASSWORD` produces **no admin account at all**. **There is no Binance
+key in this project** — Binance is called on public keyless endpoints — so
+those two are the only secrets to restore. (`USERSTORE_POOL_SIZE` is read by
+`userstore.py` with a default of 8 but is not in the blueprint; it is a third
+only if you ever set it in the dashboard.)
+
+**Verify** `/api/health`: `store_backend: postgres` and `accounts_durable:
+true`, `registered_players` matching the backup's non-guest count,
+`admin_configured` and `admin_exists` both true, `coingecko_auth` not keyless.
+In the UI the leaderboard should show the same standings and an existing
+account should log in. **Everyone is logged out** — sessions are never backed
+up — which is expected, not a symptom. Then take a fresh backup against the new
+database; the old file is now a rotation stale.
 
 That fallback is silent from the outside, which is why `/api/health` reports
 `store_backend` and `accounts_durable`. Check them after any deploy that
@@ -754,6 +859,16 @@ account), so live prices are unreachable from an artifact page.
 - `snapshots` grows ~21.6k rows/day at the 60s cycle; pruned at 90 days.
 - Equity history accumulates only while the server runs — gaps in the
   portfolio charts mean the process was down, not a bug.
+- **The `rate_limited` countdown in `/api/health` is in-process.** A redeploy
+  does not clear Binance's ban, it makes the app re-learn it from a fresh 418 —
+  so an empty `rate_limited` immediately after a deploy is not evidence the ban
+  ended. Only the wall clock ends it.
+- **`settings.save()` is global, but the portfolio reset is per-caller.**
+  Settings have no `user_id` — one visitor raising `starting_capital` changes
+  the seed capital for every future signup and guest, while only their own
+  portfolio resets. That is intended today (the start screen exists so each
+  visitor picks an opening balance) but it is a product decision, not a
+  property of the code: making it per-user is a real change, not a patch.
 - **CoinGecko 429s on the Render deployment** even though the same call
   succeeds from a home IP. Render's free tier egresses through shared
   addresses that CoinGecko rate-limits on reputation, so lowering our own
@@ -780,10 +895,17 @@ account), so live prices are unreachable from an artifact page.
   CoinGecko and *are* flagged stale — identically to the geo-block. Both
   failures now look the same on `stale`.
 
-- **A burst of deploys is enough to trigger the ban by itself.** The
-  market-data disk is ephemeral, so every deploy cold-starts and re-backfills
-  candles for all 14 Binance symbols. Four pushes inside an hour on
-  2026-07-22 produced four backfills and a ~40-minute 418. `CANDLE_CONCURRENCY
-  = 2` and deferring daily candles off cycle 0 bound the weight of *one* cold
-  start; nothing bounds how often you cold-start. Batch commits before pushing
-  when the work is a series of small ones.
+- **A burst of cold starts is enough to trigger the ban by itself.** The
+  market-data disk is ephemeral, so every cold start re-backfills candles for
+  all 14 Binance symbols. Four pushes inside an hour on 2026-07-22 produced
+  four backfills and a ~40-minute 418. `CANDLE_CONCURRENCY = 2` and deferring
+  daily candles off cycle 0 bound the weight of *one* cold start; nothing
+  bounds how often you cold-start. Batch commits before pushing when the work
+  is a series of small ones.
+
+  **Deploys are not the only trigger.** The free instance spins down when idle
+  and re-backfills on the next wake, so a site with intermittent traffic bans
+  itself with nobody touching it — observed later the same day, a fresh 418
+  with no deploy behind it. That is the real argument for a paid instance, or
+  for accepting that the rating axes are simply absent some of the time; it is
+  not something a cadence change fixes.
