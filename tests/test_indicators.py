@@ -15,6 +15,9 @@ def check(name: str, got, want, tol=1e-6):
         ok = got is None
     elif got is None:
         ok = False
+    elif isinstance(want, str) or isinstance(got, str):
+        # Signals are compared exactly; only numbers get a tolerance.
+        ok = got == want
     else:
         ok = abs(got - want) <= tol
     print(f"{'PASS' if ok else 'FAIL'}  {name}: got={got} want={want}")
@@ -91,6 +94,56 @@ check("scale degenerate", ind.scale(5, 10, 10), 50.0)
 # --- pct_change ------------------------------------------------------------
 check("pct_change +10%", ind.pct_change([100.0, 110.0], 1), 10.0, tol=1e-9)
 check("pct_change short", ind.pct_change([100.0], 5), None)
+
+# --- Signal coverage gate --------------------------------------------------
+#
+# Taken from a real outage: Binance was IP-banned, so candles stopped and
+# momentum, risk and relative all emptied out. composite_score renormalised
+# onto `structure` alone -- a quarter of the intended weight -- and the live
+# site told visitors "ETH - A- - STRONG BUY" on the strength of volume trend
+# and spread. The composite is honest about what was measured; the call to act
+# was not.
+import config  # noqa: E402
+from analytics import rating as rt  # noqa: E402
+
+FULL = {"momentum": 80.0, "risk": 80.0, "structure": 80.0, "relative": 80.0}
+ONLY_STRUCTURE = {"momentum": None, "risk": None,
+                  "structure": 82.5, "relative": None}
+NO_CANDLES = {"momentum": None, "risk": None,
+              "structure": 90.0, "relative": None}
+
+check("coverage with every axis", rt.coverage(FULL), 1.0)
+check("coverage with structure alone", rt.coverage(ONLY_STRUCTURE), 0.25)
+check("coverage with momentum + risk",
+      rt.coverage({"momentum": 50.0, "risk": 50.0,
+                   "structure": None, "relative": None}), 0.55)
+check("coverage with nothing",
+      rt.coverage({k: None for k in FULL}), 0.0)
+
+# The exact live case: structure 82.5 clears STRONG_BUY_THRESHOLD (82.0).
+comp = rt.composite_score(ONLY_STRUCTURE)
+check("one axis still yields a composite", comp, 82.5)
+check("...which would have signalled STRONG BUY ungated",
+      rt.signal_for(comp, None, None, False), "STRONG BUY")
+check("...but is suppressed on coverage",
+      rt.signal_for(comp, None, None, False, rt.coverage(ONLY_STRUCTURE)),
+      "NO DATA")
+check("a sell call is suppressed the same way",
+      rt.signal_for(20.0, None, None, False, 0.25), "NO DATA")
+check("suppression is not swayed by holding the asset",
+      rt.signal_for(rt.composite_score(NO_CANDLES), None, "BUY", True, 0.25),
+      "NO DATA")
+
+# Enough of the model present -- signals must still work normally.
+check("full coverage still signals",
+      rt.signal_for(85.0, 80.0, None, False, 1.0), "STRONG BUY")
+check("momentum + risk is enough to call",
+      rt.signal_for(85.0, 80.0, None, False, 0.55), "STRONG BUY")
+check("coverage exactly at the threshold is allowed",
+      rt.signal_for(85.0, 80.0, None, False, config.MIN_SIGNAL_COVERAGE),
+      "STRONG BUY")
+check("gate defaults open for callers that know they have data",
+      rt.signal_for(85.0, 80.0, None, False), "STRONG BUY")
 
 print()
 if failures:

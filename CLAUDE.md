@@ -512,11 +512,27 @@ account), so live prices are unreachable from an artifact page.
   an env var (`COINGECKO_API_KEY`), not a cadence change. A *wrong* key is
   loud — 401 `error_code 10002`; a *missing* one is silent, which is why
   `/api/health` reports `coingecko_auth`.
-- **Binance klines failing while `/ticker/24hr` keeps working** means a
-  rate-limit ban, not the geo-block. Confirmed cause: HTTP 418, `-1003 Way too
-  much request weight used; IP banned`. Prices survive because the ticker call
-  is one batched request; candles do not, so momentum, risk and relative empty
-  out and only HYPE stays fully rated. See *Cadence and rate limits* for the
-  three rules that came out of it. Distinguish from the geo-block by the
-  `stale` flag: under a geo-block prices fall back to CoinGecko and are flagged
-  stale, under a ban they are not.
+- **Momentum, risk and relative empty on every asset except HYPE** means
+  Binance candles are failing — either a rate-limit ban (HTTP 418, `-1003 Way
+  too much request weight used; IP banned`) or the geo-block (451). Only HYPE
+  survives because it routes to Hyperliquid. See *Cadence and rate limits*.
+
+  **Tell the two apart with `/api/health`'s `rate_limited` map, not the `stale`
+  flag.** It names the host and the seconds remaining, and it is populated
+  under a ban and empty under a geo-block.
+
+  An earlier note here said prices stay non-stale under a ban, on the reasoning
+  that `/ticker/24hr` is one batched request and survives. That is no longer
+  true and was observed failing on 2026-07-22: cooldowns in
+  `providers/base.py` are keyed by **host**, so a 418 from any endpoint parks
+  the whole of `api.binance.com`, the ticker included. Prices then fall back to
+  CoinGecko and *are* flagged stale — identically to the geo-block. Both
+  failures now look the same on `stale`.
+
+- **A burst of deploys is enough to trigger the ban by itself.** The
+  market-data disk is ephemeral, so every deploy cold-starts and re-backfills
+  candles for all 14 Binance symbols. Four pushes inside an hour on
+  2026-07-22 produced four backfills and a ~40-minute 418. `CANDLE_CONCURRENCY
+  = 2` and deferring daily candles off cycle 0 bound the weight of *one* cold
+  start; nothing bounds how often you cold-start. Batch commits before pushing
+  when the work is a series of small ones.

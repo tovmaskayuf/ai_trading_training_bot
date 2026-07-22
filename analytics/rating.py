@@ -278,16 +278,46 @@ def composite_score(sub: dict[str, float | None],
     return ind.clamp(sum(s * x for s, x in present) / total_w)
 
 
+def coverage(sub: dict[str, float | None],
+             weights: dict[str, float] | None = None) -> float:
+    """Share of the rating weight that actually had data behind it, 0.0-1.0.
+
+    composite_score renormalises over the axes it has, which keeps a score
+    usable but erases how much of the model produced it: one surviving axis
+    and all four look identical downstream. This reports that difference so
+    signal_for can refuse to make a call the data does not support.
+    """
+    w = weights or config.DEFAULT_WEIGHTS
+    total = sum(w.values())
+    if total <= 0:
+        return 0.0
+    have = sum(w[k] for k in w if sub.get(k) is not None)
+    return have / total
+
+
 def signal_for(composite: float | None, momentum: float | None,
-               prev_signal: str | None, holding: bool) -> str:
+               prev_signal: str | None, holding: bool,
+               axis_coverage: float = 1.0) -> str:
     """Signal with hysteresis.
 
     Ratings recompute every 2 minutes. A single threshold would flip constantly
     for any coin hovering near it, so entry requires crossing above
     BUY_THRESHOLD while exit requires falling all the way to EXIT_THRESHOLD.
     The band between them deliberately produces HOLD.
+
+    `axis_coverage` gates the whole thing: below MIN_SIGNAL_COVERAGE there is
+    not enough of the model left to justify telling anyone to act, so this
+    reports NO DATA even though a composite exists. Defaults to 1.0 so a
+    caller that has already established full coverage need not pass it.
     """
     if composite is None:
+        return "NO DATA"
+
+    # Not "NEUTRAL": neutral is a finding -- flat and uninteresting -- and this
+    # is the absence of one. Saying NEUTRAL here would present missing candles
+    # as a considered verdict. NO DATA is already rendered in all five
+    # languages, so this needs no new string.
+    if axis_coverage < config.MIN_SIGNAL_COVERAGE:
         return "NO DATA"
 
     if composite >= config.STRONG_BUY_THRESHOLD:
@@ -370,7 +400,8 @@ def rate_asset(symbol: str, candles: list[dict], market: dict[str, Any],
     sub = {"momentum": momentum, "risk": risk,
            "structure": structure, "relative": relative}
     composite = composite_score(sub)
-    signal = signal_for(composite, momentum, prev_signal, holding)
+    signal = signal_for(composite, momentum, prev_signal, holding,
+                        coverage(sub))
 
     return {
         **{k: (round(v, 2) if v is not None else None) for k, v in sub.items()},

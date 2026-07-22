@@ -120,6 +120,22 @@ STRONG_BUY_THRESHOLD = 82.0
 EXIT_THRESHOLD = 45.0
 STRONG_SELL_THRESHOLD = 32.0
 
+# Minimum share of the rating weight that must actually be available before a
+# directional signal is emitted at all.
+#
+# composite_score renormalises over whichever axes have data, so a single
+# surviving axis produces a full-confidence-looking number. During a Binance
+# ban that is exactly what happens: candles stop, momentum, risk and relative
+# all empty out, and `structure` alone -- a quarter of the intended weight,
+# scored on volume trend and spread -- became the whole composite. The live
+# site showed "ETH - A- - STRONG BUY" on that basis.
+#
+# The composite and grade are still published, because they are honest about
+# what was measured. The *call to act* is not: 0.5 requires at least half the
+# intended weight behind it, so structure alone (0.25) cannot produce one,
+# while momentum plus risk (0.55) can.
+MIN_SIGNAL_COVERAGE = 0.5
+
 # --- Paper trading ---------------------------------------------------------
 
 STARTING_CAPITAL = 100_000.0   # default; the user picks theirs on the start screen
