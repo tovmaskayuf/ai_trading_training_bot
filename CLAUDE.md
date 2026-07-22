@@ -370,10 +370,52 @@ live updates, light/dark themes.
   view tabs, held there by a `.header-gap` spacer on each side. It is
   deliberately *not* centred on the viewport — the right-hand cluster is wider
   than the brand, so a true centre reads as closer to the tabs than the logo.
-- **i18n**: `I18N` dict with `en`/`hy`/`uk`/`es`/`el`, 210 keys each — keep
+  **Below 760px that reverses**: the header has already wrapped onto several
+  lines by then, and a left-aligned brand above a centred pill above centred
+  tabs reads as three alignments stacked, so the whole header centres and the
+  brand takes a line of its own with the logo stacked over its text.
+- **Layout override — `Auto` / `Mobile` / `Desktop`, on the landing screen
+  only.** It is a setup choice made once beside language and starting capital,
+  not something to reach for mid-session, so it is deliberately absent from the
+  app header. Auto is the default and is the ordinary responsive behaviour, so
+  a visitor who never touches it sees no change. **The two directions work by
+  different mechanisms and there is no symmetrical pair of classes.**
+  Mobile-on-a-wide-screen is `.force-mobile`, which duplicates the media-query
+  blocks — they cannot be shared, since `@media` asks how wide the viewport is
+  and the class asks what the user picked, and one rule cannot ask both, so the
+  two must be changed together. It also narrows the document to a phone-width
+  column, because hiding a few elements at 1400px still reads as the desktop
+  page with gaps in it; the column width *is* the layout. Desktop-on-a-phone
+  is **not reachable from CSS at all** — switching the mobile rules off does
+  not widen a 390px screen, it just overflows — so `applyLayout()` rewrites the
+  viewport meta to a fixed width and lets the browser scale, the same mechanism
+  as a browser's own "Request desktop site", with the same consequence that
+  text lands small. Applied from an inline `<head>` script before first paint:
+  setting the viewport afterwards re-flows and re-scales the page in front of
+  the user.
+- **Icon buttons spin on press**, delegated from `document` so circles rendered
+  later (the drawer close, the master console) are covered without every render
+  opting in. `.btn.icon` is a true 30px circle rather than a short pill for
+  this — a wider-than-tall box visibly wobbles when rotated. A repeat press
+  forces a reflow or the animation does not restart. Suppressed under
+  `prefers-reduced-motion`: the spin is feedback, not information. The layout
+  button swaps its glyph at the halfway point so the same spin reads as one
+  icon turning into the next; `#setupBtn` holds the landing transition back
+  300ms, because `.hide` is `display:none` and the landing otherwise covers the
+  button before any of the turn is visible.
+- **i18n**: `I18N` dict with `en`/`hy`/`uk`/`es`/`el`, 221 keys each — keep
   all five languages in exact key parity when adding strings.
   `data-i18n` sets `textContent`, `data-i18n-ph` sets `placeholder`; both are
   swept by `applyStatic()` and both are checked by the frontend test.
+  **Anything built in JS carries no `data-i18n`, so `applyStatic()` cannot
+  reach it** — it has to be repainted by hand or it sits in the previous
+  language until something else redraws it. `setLang()` accumulates those
+  calls (the leaderboard headers, `renderSubtitle()`); the layout button
+  hangs off `applyStatic()` instead, because boot sets it *before* the saved
+  language resolves and that is the pass which corrects it. Prefer one
+  templated key over a number glued to a word: `cycleEvery:"{n}s cycles"` is
+  one string per language because Spanish and Ukrainian both put the unit
+  after the noun, and "60s" + "cycles" cannot express that.
   **Duplicate keys are legal JavaScript and the last one silently wins**, so
   editing the first occurrence appears to do nothing. Parallel edits produced
   three of these; the frontend test now fails on any duplicate.
