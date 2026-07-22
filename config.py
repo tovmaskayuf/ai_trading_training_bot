@@ -155,12 +155,6 @@ EQUITY_RETENTION_DAYS = 90
 # loads, and each one used to cost an equity row every cycle forever.
 GUEST_TTL_DAYS = 7
 
-# Window for counting a guest as currently active, in hours. Comfortably wider
-# than userstore.TOUCH_INTERVAL_MS (1h): last_seen_ts is throttled to one write
-# per hour, so a continuously-active visitor's stamp can trail reality by that
-# much, and a window any tighter would flicker them in and out of the count.
-GUEST_ACTIVE_HOURS = 24
-
 # How often the engine runs the maintenance pass, in cycles. Hourly at the
 # 60-second cadence: these are bulk deletes over indexed columns, and running
 # them per cycle would spend more time pruning than the rows cost to keep.
