@@ -461,7 +461,14 @@ def leaderboard(prices: dict[str, float], limit: int = 100) -> list[dict[str, An
             "user_id": r["id"],
             "name": r["display_name"],
             "total": total,
+            # Published alongside the total so the board can show what each
+            # player actually chose to start with. Ranking is by percentage
+            # return, but a bare total still reads as a score, and someone who
+            # opened with $10M looks like they are winning while flat.
             "starting_capital": float(r["starting_capital"]),
+            # Money made or lost, which is the honest currency figure: it is
+            # zero for an untouched account no matter how large that account is.
+            "pnl": total - float(r["starting_capital"]),
             "return_pct": (total / capital - 1) * 100,
             "trade_count": counts.get(r["id"], 0),
         })
