@@ -115,26 +115,40 @@ def is_admin(user: dict[str, Any] | None) -> bool:
 def _visible_sql(alias: str = "u") -> str:
     """SQL predicate for the accounts the console is allowed to show.
 
-    Registered players always; a guest only once they have traded. Every
-    cookie-less request mints a guest row -- crawlers, uptime probes and
-    one-off page loads each leave one behind -- so untraded guests are
-    overwhelmingly not people, and listing them buries the players who are.
-    Placing a trade is the first deliberate thing a visitor does, which makes
-    it a better line than age or session count.
+    Registered players always; a guest once there is evidence of a real client
+    behind them, whether or not they have ever traded.
+
+    That evidence is `last_seen_ts IS NOT NULL`, and it is stronger than it
+    looks. create_guest() leaves the column NULL, and userstore._touch() -- the
+    only thing that ever sets it -- runs exclusively from user_for_session(),
+    which needs a session cookie presented back to us. So the stamp exists if
+    and only if the visitor stored the HttpOnly cookie we set and returned it
+    on a later request. A browser does that on the same page load, via the
+    first XHR the dashboard fires. A crawler that requests the page once and
+    discards the Set-Cookie never does, and its row stays NULL forever.
+
+    It is evidence, not proof: a headless browser that keeps a cookie jar
+    passes this too. It separates real clients from one-shot fetchers, which
+    is what actually floods the table -- not determined scrapers.
 
     Shared by list_players() and player_detail() so the two agree exactly. If
     they drifted, a guest hidden from the list would still be fetchable by id,
     which is hiding rather than protecting.
     """
-    return (f"({alias}.is_guest = 0 OR EXISTS "
-            f"(SELECT 1 FROM user_trades t WHERE t.user_id = {alias}.id))")
+    return f"({alias}.is_guest = 0 OR {alias}.last_seen_ts IS NOT NULL)"
+
+
+def _active_cutoff() -> int:
+    """Epoch ms before which a guest is no longer counted as active."""
+    return now_ms() - config.GUEST_ACTIVE_HOURS * 3_600_000
 
 
 def list_players(prices: dict[str, float]) -> list[dict[str, Any]]:
     """Accounts the console tracks, with live standing. Guests flagged.
 
-    Untraded guests are excluded -- see _visible_sql(). stats() still counts
-    every guest, so the headline number stays honest about total traffic.
+    Guests with no sign of a real client are excluded -- see _visible_sql().
+    stats() still reports the raw row count as well, so the difference between
+    visitors and crawler noise stays visible rather than being quietly dropped.
     """
     rows = userstore.query(
         "SELECT u.id, u.username, u.display_name, u.is_guest, u.is_admin, "
@@ -221,8 +235,9 @@ def player_detail(user_id: int, prices: dict[str, float]) -> dict[str, Any]:
         raise AdminError("That player no longer exists.")
     if not row.pop("visible"):
         raise AdminError(
-            "That visitor is a guest who has not traded. The console does not "
-            "track them until they place a trade or create an account.")
+            "That guest row has never been used by a real client -- it is an "
+            "abandoned page load, most likely a crawler. The console does not "
+            "track them.")
 
     for f in ("is_guest", "is_admin", "is_blocked"):
         row[f] = bool(row[f])
@@ -320,18 +335,32 @@ def reset_password(user_id: int, new_password: str) -> dict[str, Any]:
 
 
 def stats(prices: dict[str, float]) -> dict[str, Any]:
-    """Headline numbers for the admin dashboard."""
+    """Headline numbers for the admin dashboard.
+
+    Three separate guest numbers, because collapsing them hides the thing
+    worth knowing. `guest_rows` is every row ever minted and is mostly crawler
+    noise; `guests` is the ones a real client stood behind; `guests_active`
+    is those seen within GUEST_ACTIVE_HOURS. A large gap between the first two
+    is normal for a public page, not a fault.
+    """
     counts = userstore.query_one(
         "SELECT COUNT(*) AS total, "
-        "       COALESCE(SUM(CASE WHEN is_guest = 1 THEN 1 ELSE 0 END), 0) AS guests, "
+        "       COALESCE(SUM(CASE WHEN is_guest = 1 THEN 1 ELSE 0 END), 0) AS guest_rows, "
+        "       COALESCE(SUM(CASE WHEN is_guest = 1 AND last_seen_ts IS NOT NULL "
+        "                        THEN 1 ELSE 0 END), 0) AS guests_real, "
+        "       COALESCE(SUM(CASE WHEN is_guest = 1 AND last_seen_ts >= ? "
+        "                        THEN 1 ELSE 0 END), 0) AS guests_active, "
         "       COALESCE(SUM(CASE WHEN is_blocked = 1 THEN 1 ELSE 0 END), 0) AS blocked "
-        "FROM users") or {}
+        "FROM users", (_active_cutoff(),)) or {}
     trades = userstore.query_one(
         "SELECT COUNT(*) AS n, COALESCE(SUM(fee), 0) AS fees FROM user_trades") or {}
+    total = counts.get("total", 0) or 0
     return {
-        "total_accounts": counts.get("total", 0),
-        "guests": counts.get("guests", 0),
-        "registered": (counts.get("total", 0) or 0) - (counts.get("guests", 0) or 0),
+        "total_accounts": total,
+        "guests": counts.get("guests_real", 0),
+        "guest_rows": counts.get("guest_rows", 0),
+        "guests_active": counts.get("guests_active", 0),
+        "registered": total - (counts.get("guest_rows", 0) or 0),
         "blocked": counts.get("blocked", 0),
         "total_trades": trades.get("n", 0),
         "total_fees": float(trades.get("fees") or 0),
