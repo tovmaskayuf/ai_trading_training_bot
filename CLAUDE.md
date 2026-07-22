@@ -95,6 +95,35 @@ string on SQLite, so a local run exercises the `BEGIN IMMEDIATE` path and
 leaves the row locking that production actually depends on completely
 untested.
 
+**Verified on 2026-07-22** against PostgreSQL 17.10: `test_portfolio`,
+`test_admin`, `test_maintenance` and `test_concurrency` all pass on the
+Postgres backend. The row lock was confirmed load-bearing rather than assumed
+— with `for_update` monkeypatched to `''`, 24 concurrent buys removed **$50
+instead of $240**; restored, exactly $240. Re-run that proof after any change
+to `tx()`, `_cash_in()` or the pool, because every one of those suites passes
+on SQLite whether or not the Postgres locking works.
+
+Spinning up a throwaway cluster, given `brew install postgresql@17`:
+
+```bash
+PGBIN=/opt/homebrew/opt/postgresql@17/bin
+PGDATA=/tmp/pgscratch                       # keep this path SHORT -- see below
+"$PGBIN/initdb" -D "$PGDATA" -U postgres --auth=trust -E UTF8
+"$PGBIN/pg_ctl" -D "$PGDATA" -l "$PGDATA/server.log" \
+  -o "-p 55432 -c listen_addresses=127.0.0.1 -c unix_socket_directories=''" start
+"$PGBIN/createdb" -h 127.0.0.1 -p 55432 -U postgres scratch
+DATABASE_URL="postgresql://postgres@127.0.0.1:55432/scratch" \
+  .venv/bin/python tests/test_concurrency.py
+"$PGBIN/pg_ctl" -D "$PGDATA" stop -m fast && rm -rf "$PGDATA"
+```
+
+`unix_socket_directories=''` is not optional if `$PGDATA` sits anywhere deep:
+the socket path has a **103-byte limit**, and the session scratchpad path
+alone overruns it. The failure reads as `Connection refused`, and the real
+reason is only in `server.log`. A non-default port keeps this clear of the
+cluster `brew install` creates at `/opt/homebrew/var/postgresql@17`, which is
+not what you want to point tests at.
+
 Always run from the project root. Tests point `config.DB_PATH` (and
 `config.BASE_DIR` for the user store) at a scratch temp file **before**
 importing `db`/`userstore`, so they never touch real state — preserve that
@@ -271,49 +300,6 @@ past `EQUITY_RETENTION_DAYS` (90).
 here declares foreign keys, so nothing cascades on its own** — deleting a user
 without walking that list leaves orphans behind.
 
-### Concurrency — the routes are threaded, so the stores must be
-
-Three pieces that only make sense together. `tests/test_concurrency.py` pins
-all of them; none of it is exercised by a single-threaded test.
-
-**1. DB-touching routes are plain `def`, not `async def`.** sqlite3 and psycopg
-block. A blocking call inside `async def` runs on the event loop and stalls
-everything sharing it — the engine cycle, every open SSE stream, every other
-request. FastAPI runs a plain `def` handler in a threadpool instead. Only
-`lifespan`, `stream` and `index` stay coroutines. This is invisible locally
-(SQLite on local disk, ~0.04ms a snapshot) and severe on Render (four
-sequential round-trips to Postgres in another datacentre), so the cost never
-shows up where you would notice it.
-
-**2. A bounded connection pool, not one shared connection.** Commit and
-rollback act on a *connection*: with one of them, two threads inside `tx()`
-would let one thread's rollback discard the other's uncommitted statements. A
-process-wide `RLock` fixed that correctly and cost everything — measured at
-0.26x, eight parallel readers taking four times longer than doing the same
-reads serially, purely in contention. A connection each makes the interleaving
-structurally impossible rather than merely prevented. Bounded at 8, not
-per-thread: the route threadpool is ~40, and 40 connections against free-plan
-Postgres trades a throughput problem for a connection-limit one.
-
-**3. Trades read through the open transaction, and take a row lock.**
-`portfolio.buy`/`sell` read cash and the holding via `_cash_in()`/
-`_holding_in()` on the transaction's own cursor, never the module-level
-helpers, and every written value derives from that read. Reading outside and
-writing an absolute value back is a **lost update**: concurrent buys all see
-the opening balance, all compute the same closing one, and every write but the
-last is discarded. Measured at 24 concurrent $10 buys taking **$110 out of cash
-instead of $240** — with all 24 trades booked, so the buyer kept the assets
-*and* most of the money. `DIALECT.for_update` appends `FOR UPDATE` on Postgres;
-SQLite gets the same guarantee from `BEGIN IMMEDIATE`, which is why its
-connections are opened with `isolation_level=None` (the default defers the
-write lock until after the read it exists to protect).
-
-None of this was reachable while every route was `async def` on one event loop,
-because nothing interleaved. Moving to a threadpool made all three live at
-once — the ordering matters if you ever revisit it: **the pool and the row
-locks are what make `def` routes safe**, so do not reintroduce one without the
-others.
-
 ### Engine (`engine.py`)
 
 One asyncio loop: fetch → snapshot → rate → `portfolio.record_equity_all` →
@@ -391,8 +377,8 @@ Every trade writes the holding, the trade row **and the cash balance inside one
 transaction**. Writing cash afterwards leaves a window where a crash books the
 asset without the payment — free money on a buy, vanished proceeds on a sell.
 The *reads* have to be inside that transaction too, and under a row lock — see
-**Concurrency** above, where the same "free money" shows up again via a lost
-update rather than a crash.
+**Storage** above, where the same "free money" reappears as a lost update
+between concurrent buyers rather than as a crash.
 
 `snapshot()` aggregates trade totals **in SQL**, not by pulling rows into
 Python: it runs once per cycle per connected client, so a long history would
@@ -522,10 +508,23 @@ at "now". Trade prices are resolved **server-side** so a stale tab cannot
 fill at an old quote. `/api/overview` re-stamps `followed`/`held` flags at
 read time because the engine's copy is up to a minute stale.
 
-**Handlers that touch a database are plain `def`.** That is not an oversight —
-see **Concurrency** above for why, and for the two things in `userstore` that
-make it safe. Adding `async` to one of these routes silently puts blocking
-database I/O back on the event loop.
+**Handlers that touch a database are plain `def`, not `async def`, and that is
+deliberate.** sqlite3 and psycopg block. A blocking call inside `async def`
+runs on the event loop and stalls everything sharing it — the engine cycle,
+every open SSE stream, every other request — for its full duration. FastAPI
+runs a plain `def` handler in a threadpool instead, so the loop stays free.
+Only `lifespan`, `stream` and `index` genuinely need to be coroutines.
+
+The cost never shows up where you would notice it: locally `DATABASE_URL` is
+unset, so the store is SQLite on a local disk and a portfolio snapshot is
+~0.04ms; the same code on Render makes four sequential round-trips to a
+Postgres in another datacentre. Identical source, two orders of magnitude
+apart, and only the deployed one blocks the engine.
+
+**Adding `async` to one of these routes puts blocking database I/O back on the
+event loop, silently.** It is also what made the pooling and row-locking in
+`userstore`/`portfolio` necessary — nothing interleaved while every route was a
+coroutine. See **Storage** above before changing any of it.
 
 `require_user()` resolves an HttpOnly session cookie and creates a guest on
 first visit. **Every portfolio-mutating endpoint is scoped to that caller** —
