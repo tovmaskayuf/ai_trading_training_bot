@@ -74,13 +74,26 @@ that suite fails loudly rather than skipping, which is deliberate.
 .venv/bin/python tests/test_admin.py         # block / delete / reset + no password leak
 .venv/bin/python tests/test_ratelimit.py     # no retry on 418/429, host cooldowns
 .venv/bin/python tests/test_maintenance.py   # retention: guest purge, equity prune
+.venv/bin/python tests/test_concurrency.py   # no lost updates, rollback isolation
 .venv/bin/python tests/test_frontend.py      # JS parses, i18n parity, DOM sanity
 .venv/bin/python -m uvicorn server:app --port 8000   # run everything
 ```
 
-`test_portfolio.py`, `test_admin.py` and `test_maintenance.py` run against
-whichever backend is configured, so they double as the Postgres check:
+`test_portfolio.py`, `test_admin.py`, `test_maintenance.py` and
+`test_concurrency.py` run against whichever backend is configured, so they
+double as the Postgres check:
 `DATABASE_URL=postgresql://… .venv/bin/python tests/test_portfolio.py`.
+
+**Point the Postgres form at a scratch database, never the live one.**
+`test_concurrency.py` in particular creates accounts it does not clean up and
+inserts ~160k equity rows to make its throughput comparison meaningful, which
+is not something to spend on the free plan's 1 GB ceiling.
+
+**Running `test_concurrency.py` against Postgres is not optional before
+trusting a change to the storage layer.** `DIALECT.for_update` is an empty
+string on SQLite, so a local run exercises the `BEGIN IMMEDIATE` path and
+leaves the row locking that production actually depends on completely
+untested.
 
 Always run from the project root. Tests point `config.DB_PATH` (and
 `config.BASE_DIR` for the user store) at a scratch temp file **before**
@@ -92,6 +105,20 @@ once shipped a dashboard whose markup did not parse: an unclosed `<noscript>`
 swallowed the entire body, so the server stayed healthy and every API check
 passed while the page was blank. A brace-balance count was treated as proof the
 file was valid. It is not — only `node --check` and an HTML parse are.
+
+**A `var(--x)` that is never defined fails silently and is not a style bug you
+will spot in review.** With no fallback it is *invalid at computed-value time*:
+the declaration is dropped and the property takes its initial value, which for
+`background-color` is `transparent`. `--surface-0` was referenced in three
+rules and defined in neither theme from the first commit until 2026-07-22 —
+it left the account modal with no panel, flattened `.dr-stat` (`.dr-stats`
+paints `--border` behind a 1px gap, so opaque tiles are what draw the grid
+lines), and, because `.dr-head` is `position:sticky`, let a player's whole
+trade list scroll up *through* the master console's panel header with the two
+sets of text painting over each other. `test_frontend.py` now fails on any
+bare `var(--x)` with no definition, and on a `position:sticky` rule that
+declares no background at all. A fallback — `var(--x, #fff)` — is safe and is
+not flagged.
 
 **The directory name contains `}{`** (`ai_trading}{bot`). Braces break
 unquoted shell paths — always quote it. This is why the GitHub repo is named
@@ -156,6 +183,58 @@ literal percent becomes a placeholder.
 semicolon *inside a comment* otherwise cuts it in half and the remainder parses
 as SQL. That was a real bug.
 
+**Connections are pooled, and the ordering that makes trades safe now comes
+from the database rather than from Python.** This is the part to read before
+touching `userstore.py` or `portfolio.py`.
+
+The store used to hold one connection behind one process-wide `RLock`. That was
+correct — commit and rollback act on a *connection*, so with only one of them
+two threads inside `tx()` would let one thread's rollback discard the other's
+uncommitted statements — but it meant no two requests ever touched the database
+at once. Measured at 0.26x: eight threads reading in parallel took nearly four
+times as long as the same reads run one after another, purely in contention.
+
+It is now a **bounded pool** (`_POOL_SIZE`, default 8, `USERSTORE_POOL_SIZE`),
+one connection borrowed per statement or transaction. Bounded rather than
+per-thread on purpose: FastAPI runs the `def` routes in a ~40-thread pool, and
+40 connections against free-plan Postgres trades a throughput problem for a
+connection-limit one. Borrowers queue when all are busy, which is backpressure,
+not a stall.
+
+**The lock was load-bearing for correctness, not just a drag, and removing it
+silently reintroduced a lost update.** `portfolio.buy` reads cash through the
+transaction's cursor and writes an absolute balance back; that only worked
+because the lock serialised whole transactions. Without it, 24 concurrent buys
+removed **$10 instead of $240** — the same failure the read-through-cursor
+change was originally made to fix. So:
+
+- **Postgres**: `DIALECT.for_update` appends `FOR UPDATE` to the balance read,
+  locking that portfolio row for the transaction. Finer grained than the old
+  lock — trades by *different* users now genuinely run at once.
+- **SQLite**: `tx()` opens with `BEGIN IMMEDIATE`, taking the write lock before
+  the read it protects instead of on first write. This is why the SQLite
+  connection sets `isolation_level=None`: at the driver default a deferred
+  transaction begins implicitly and too late to help.
+
+**`_cash_in()` must be called first in any transaction that touches a user's
+money**, before reading anything else that gets written back. It is the
+serialisation point. `sell()` had to be reordered for this — it read the
+holding first, and quantity is written back as an absolute too.
+
+Two consequences worth keeping in mind. **No `query()` may be called inside a
+`tx()` block**: it would borrow a *different* connection and not see the
+transaction's uncommitted writes. There are none today and an AST check
+confirmed it before the change; keep it that way. And `query()` rolls back
+after reading, because psycopg runs with autocommit off and even a SELECT opens
+a transaction — left alone, every pooled connection would sit *idle in
+transaction*, pinning vacuum and holding locks.
+
+Throughput is reported for two workloads by `test_concurrency.py`, because one
+number misleads. A microsecond SQLite lookup has no I/O to overlap and the GIL
+serialises the rest, so pooling *costs* 0.09x there. A query that spends real
+time inside the driver — every query in production, where the store is Postgres
+across a network — gives 3.96x. Do not quote either figure alone.
+
 **Retention on the durable side is a size bound, not tidiness.** Free Postgres
 has a hard 1 GB ceiling and holds the *only* copy of every account, while the
 market-data store is regenerable and prunes itself. `userstore.maintenance()`
@@ -171,9 +250,7 @@ pass: `user_equity` is keyed `(user_id, ts)` and `sessions` on `token`, so
 each degraded into a full scan of the table. `idx_user_equity_ts` and
 `idx_sessions_expires` exist for exactly those two deletes — measured at 19.55ms
 scanning vs 0.86ms seeking over 1.08M equity rows, and the scan grows with the
-table while the seek does not. This costs more than it looks: every statement
-in this module runs under one process-wide lock, so a slow maintenance delete
-blocks every concurrent request, not just itself. Note the index is a genuine
+table while the seek does not. Note the index is a genuine
 *loss* on a delete that removes a large fraction of the table (77ms scanning vs
 168ms indexed when trimming a third) — the hourly steady-state prune, which
 removes one cycle's worth past the boundary, is the case being optimised for.
@@ -193,6 +270,49 @@ past `EQUITY_RETENTION_DAYS` (90).
 `_USER_TABLES` is ordered so child rows never outlive their user: **no backend
 here declares foreign keys, so nothing cascades on its own** — deleting a user
 without walking that list leaves orphans behind.
+
+### Concurrency — the routes are threaded, so the stores must be
+
+Three pieces that only make sense together. `tests/test_concurrency.py` pins
+all of them; none of it is exercised by a single-threaded test.
+
+**1. DB-touching routes are plain `def`, not `async def`.** sqlite3 and psycopg
+block. A blocking call inside `async def` runs on the event loop and stalls
+everything sharing it — the engine cycle, every open SSE stream, every other
+request. FastAPI runs a plain `def` handler in a threadpool instead. Only
+`lifespan`, `stream` and `index` stay coroutines. This is invisible locally
+(SQLite on local disk, ~0.04ms a snapshot) and severe on Render (four
+sequential round-trips to Postgres in another datacentre), so the cost never
+shows up where you would notice it.
+
+**2. A bounded connection pool, not one shared connection.** Commit and
+rollback act on a *connection*: with one of them, two threads inside `tx()`
+would let one thread's rollback discard the other's uncommitted statements. A
+process-wide `RLock` fixed that correctly and cost everything — measured at
+0.26x, eight parallel readers taking four times longer than doing the same
+reads serially, purely in contention. A connection each makes the interleaving
+structurally impossible rather than merely prevented. Bounded at 8, not
+per-thread: the route threadpool is ~40, and 40 connections against free-plan
+Postgres trades a throughput problem for a connection-limit one.
+
+**3. Trades read through the open transaction, and take a row lock.**
+`portfolio.buy`/`sell` read cash and the holding via `_cash_in()`/
+`_holding_in()` on the transaction's own cursor, never the module-level
+helpers, and every written value derives from that read. Reading outside and
+writing an absolute value back is a **lost update**: concurrent buys all see
+the opening balance, all compute the same closing one, and every write but the
+last is discarded. Measured at 24 concurrent $10 buys taking **$110 out of cash
+instead of $240** — with all 24 trades booked, so the buyer kept the assets
+*and* most of the money. `DIALECT.for_update` appends `FOR UPDATE` on Postgres;
+SQLite gets the same guarantee from `BEGIN IMMEDIATE`, which is why its
+connections are opened with `isolation_level=None` (the default defers the
+write lock until after the read it exists to protect).
+
+None of this was reachable while every route was `async def` on one event loop,
+because nothing interleaved. Moving to a threadpool made all three live at
+once — the ordering matters if you ever revisit it: **the pool and the row
+locks are what make `def` routes safe**, so do not reintroduce one without the
+others.
 
 ### Engine (`engine.py`)
 
@@ -235,6 +355,30 @@ BUY); `NEUTRAL` = flat. Do not feed `HOLD` back into the carry-forward
 condition in `signal_for` — that makes it self-sustaining and `NEUTRAL`
 unreachable (past bug).
 
+**A signal needs enough of the model behind it, and that is checked
+separately from the score.** `composite_score()` renormalises over whichever
+axes have data — which keeps a score usable, but erases how much of the model
+produced it: one surviving axis and all four look identical downstream.
+`coverage()` reports the share of rating weight that actually had data, and
+`signal_for()` returns `NO DATA` below `MIN_SIGNAL_COVERAGE` (0.5). Structure
+alone (weight 0.25) cannot produce a directional call; momentum plus risk
+(0.55) can.
+
+This came from a live incident on 2026-07-22. A Binance ban stopped candles,
+so momentum, risk and relative emptied out on all 14 Binance-sourced assets
+and `structure` — scored on volume trend and spread — became the entire
+composite. ETH's 82.5 cleared `STRONG_BUY_THRESHOLD`, and the site told
+visitors **"ETH · A- · STRONG BUY"** on a quarter of the model, during an
+outage, with nothing on screen indicating anything was missing.
+
+The composite and grade are still published: they are honest about what was
+measured. It is the instruction to *act* that is withheld. Suppressed signals
+report `NO DATA`, not `NEUTRAL` — neutral is a finding (flat and
+uninteresting) and this is the absence of one. `sigNODATA` already exists in
+all five languages, so suppression needs no new strings. HYPE routes to
+Hyperliquid and keeps three axes through a Binance ban, so it is unaffected,
+which is the correct outcome rather than a special case.
+
 ### Portfolio (`portfolio.py`)
 
 Per-user. Holdings model with **average cost basis** (fees included in basis),
@@ -246,6 +390,9 @@ the fees; `tests/test_portfolio.py` asserts this.
 Every trade writes the holding, the trade row **and the cash balance inside one
 transaction**. Writing cash afterwards leaves a window where a crash books the
 asset without the payment — free money on a buy, vanished proceeds on a sell.
+The *reads* have to be inside that transaction too, and under a row lock — see
+**Concurrency** above, where the same "free money" shows up again via a lost
+update rather than a crash.
 
 `snapshot()` aggregates trade totals **in SQL**, not by pulling rows into
 Python: it runs once per cycle per connected client, so a long history would
@@ -254,7 +401,12 @@ point for every portfolio in a single bulk pass for the same reason.
 
 `leaderboard()` marks every player to the **same live prices at read time**
 rather than reading stored equity rows — otherwise whoever traded most recently
-would rank on the freshest valuation. Guests are excluded.
+would rank on the freshest valuation. Guests are excluded, **and so are
+admins** (`is_admin = 0` in both queries, the holdings join as well as the user
+row): `ensure_master()` hands the master account a portfolio and starting
+capital like anyone else, so without the filter the operator ranked in the
+public standings against the players they administer, holding a portfolio
+nobody else can block, delete or reset.
 
 It publishes `starting_capital` and `pnl` alongside the total, and the board
 shows profit rather than the raw balance, because **players choose their own
@@ -298,6 +450,37 @@ public. With `MASTER_PASSWORD` unset no admin account is created at all, rather
 than one with a guessable password. The hash is re-applied on every boot, so
 rotating the env var rotates the credential.
 
+**The admin account cannot be deleted, and asking for that is usually asking
+for something else.** `_target()` refuses it, and `ensure_master()` re-seeds
+the row from the environment on every boot — Render's free tier spins down when
+idle, so a direct row delete survives until the next visitor's cold start and
+no longer. Genuinely removing it means clearing `MASTER_PASSWORD` first,
+redeploying, *then* deleting the row, and leaves no admin at all. When the
+complaint is "the master account is showing up on the leaderboard", the fix is
+the `is_admin` filter in `leaderboard()`, not deletion.
+
+**The console tracks players, not visitors.** `_visible_sql()` is the one
+predicate for who the admin surface may show: registered accounts always, a
+guest only once they have traded. Every cookie-less request mints a guest row,
+so untraded guests are overwhelmingly crawlers and probes, and listing them
+buries the real players. It is shared by `list_players()` and `player_detail()`
+**so the two cannot drift** — a guest hidden from the list but still fetchable
+by id would be hiding rather than protecting, the same mistake the Master
+tab's server-side 404s exist to avoid. `stats()` still counts every guest row,
+so the headline number stays honest about total traffic.
+
+A cookie round-trip (`last_seen_ts IS NOT NULL`) was tried here as a "real
+device" test and reverted: it correctly identifies a real browser, but admits
+anyone who merely opened the page, which is most of the noise the filter
+exists to remove.
+
+**Guests cannot be blocked or deleted either**, and this costs nothing that
+worked: a guest has no credential to block — clearing the cookie mints a fresh
+row on the next request — and `purge_stale_guests()` already removes untraded
+guests after `GUEST_TTL_DAYS`. `reset_password()` refused them already. The
+boundary sits at signup, which is the same line the leaderboard has always
+drawn.
+
 **Passwords cannot be revealed, and this is not a gap to be closed.** They are
 PBKDF2 hashes; there is nothing to read back, and storing them reversibly would
 expose every player (people reuse passwords across sites) for no operational
@@ -320,6 +503,16 @@ block instead of failing blank.
 freeing the username for reuse is the point. Admins cannot be blocked or
 deleted, which also stops the operator locking themselves out.
 
+**The admin's own password cannot be reset from the console either, and that is
+not the same refusal as block/delete.** Its password does not live in the
+database to begin with: `ensure_master()` re-applies `MASTER_PASSWORD` on every
+boot, so a reset would hold until the next restart and then revert with nothing
+said — on a free tier that spins down when idle, minutes away. The operator
+would be left believing they had rotated a credential that had already changed
+back, which is worse than being told no. Rotate the environment variable and
+restart; that is the only place the value exists. The button is disabled and
+carries a tooltip saying so, but the enforcement is in `reset_password()`.
+
 ### Server (`server.py`)
 
 `RANGES` maps `1h|24h|7d|30d|1y|all` to cutoffs; history endpoints downsample
@@ -328,6 +521,11 @@ server-side to ~360 points. `/api/asset/{s}/prices` picks resolution by range
 at "now". Trade prices are resolved **server-side** so a stale tab cannot
 fill at an old quote. `/api/overview` re-stamps `followed`/`held` flags at
 read time because the engine's copy is up to a minute stale.
+
+**Handlers that touch a database are plain `def`.** That is not an oversight —
+see **Concurrency** above for why, and for the two things in `userstore` that
+make it safe. Adding `async` to one of these routes silently puts blocking
+database I/O back on the event loop.
 
 `require_user()` resolves an HttpOnly session cookie and creates a guest on
 first visit. **Every portfolio-mutating endpoint is scoped to that caller** —
@@ -451,6 +649,15 @@ live updates, light/dark themes.
   the dataviz skill — every use is direct-labeled, never color-alone.
 - The drawer defers re-renders while the user is typing an amount
   (`drawerBusy()`), or a cycle update would wipe their input mid-trade.
+- **Grid rows holding variable-length text need `minmax(0,…)` and
+  `min-width:0`.** Grid items default to `min-width:auto` and will not shrink
+  below their own content, so one long `0.123456 @ $65,947.52` in the master
+  console's trade row widened its track, pushed the fixed columns right and
+  overflowed the row rather than fitting. Fixed columns plus a `1fr` looks
+  safe and is not: at the drawer's phone width the fixed columns alone
+  exceeded the space. The rows also highlight on hover — thirty near-identical
+  monospace lines separated by hairlines give the eye nothing to lock onto,
+  and there is no selected state here to lean on.
 
 ## Cadence and rate limits
 
