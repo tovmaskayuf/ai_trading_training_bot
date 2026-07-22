@@ -178,6 +178,36 @@ def main() -> None:
         check(f"no native {fn}() in the dashboard", not hits,
               f"{len(hits)} call(s)")
 
+    # --- CSS custom properties --------------------------------------------
+    # var(--x) with no definition and no fallback is *invalid at computed-value
+    # time*: the declaration is dropped and the property takes its initial
+    # value. For background-color that is `transparent`, which fails silently
+    # and only shows up as a visual defect.
+    #
+    # --surface-0 was referenced in three rules and defined in neither theme,
+    # from the first commit until 2026-07-22. It made the account modal
+    # panel-less and, because .dr-head is position:sticky, let a player's whole
+    # trade list scroll up through the master console's panel header -- the
+    # header text and the rows painted over each other.
+    css = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, flags=re.S))
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    defined = set(re.findall(r"(--[\w-]+)\s*:", css))
+    # A fallback makes the reference safe -- var(--x, #fff) renders even when
+    # --x is missing -- so only bare references are faults.
+    used_bare = set(re.findall(r"var\(\s*(--[\w-]+)\s*\)", css))
+    undefined = sorted(used_bare - defined)
+    check("every CSS variable used is defined", not undefined,
+          f"undefined={undefined}")
+
+    # Sticky headers paint over scrolling content, so a transparent one is not
+    # a cosmetic slip -- it is unreadable overlap. Catch it directly rather
+    # than relying on the variable check above to imply it.
+    for rule in re.findall(r"([^{}]+)\{([^{}]*position\s*:\s*sticky[^{}]*)\}", css):
+        selector, body = rule[0].strip(), rule[1]
+        has_bg = re.search(r"background(-color)?\s*:", body)
+        check(f"sticky rule '{selector.splitlines()[-1].strip()[:40]}' sets a background",
+              bool(has_bg), "sticky without a background shows content through it")
+
     # --- Structure --------------------------------------------------------
     # Comments discuss these tags by name, so count only real markup.
     markup = re.sub(r"<!--.*?-->", "", html, flags=re.S)

@@ -556,9 +556,15 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
   background:color-mix(in srgb, #000 55%, transparent); backdrop-filter:blur(4px);
 }
 .modal-wrap.hide { display:none; }
+/* --surface-1, not --surface-0: the latter was referenced in three places and
+   defined in neither theme. An undefined custom property with no fallback is
+   invalid at computed-value time, so background-color fell back to its initial
+   value -- transparent. Here that left the modal panel-less over the scrim; on
+   the sticky .dr-head below it let the whole trade list scroll through the
+   header. --surface-1 is what the drawer and .drawer-head already use. */
 .modal {
   position:relative; width:100%; max-width:380px;
-  background:var(--surface-0); border:1px solid var(--border);
+  background:var(--surface-1); border:1px solid var(--border);
   border-radius:18px; padding:28px 26px 22px;
   box-shadow:0 24px 60px rgba(0,0,0,.45);
 }
@@ -679,23 +685,44 @@ input[type=range]::-moz-range-thumb { width:15px; height:15px; border-radius:50%
 /* Player detail panel, reusing the trade drawer's slot on the right. */
 .dr-head { display:flex; align-items:flex-start; gap:12px; padding:20px 22px 14px;
   border-bottom:1px solid var(--border); position:sticky; top:0;
-  background:var(--surface-0); z-index:2; }
+  background:var(--surface-1); z-index:2; }
 .dr-head h2 { font-size:17px; letter-spacing:-.02em; }
 .dr-head .modal-x { position:static; margin-left:auto; flex:none; }
 .dr-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(118px,1fr));
   gap:1px; background:var(--border); border-bottom:1px solid var(--border); }
-.dr-stat { background:var(--surface-0); padding:12px 14px; }
+/* Opaque on purpose: .dr-stats paints --border behind a 1px gap, so the tiles
+   are what draw the grid lines. Transparent tiles turned the whole block into
+   a solid slab of border colour. */
+.dr-stat { background:var(--surface-1); padding:12px 14px; }
 .dr-stat .label { font-size:10.5px; color:var(--text-muted); text-transform:uppercase;
   letter-spacing:.05em; margin-bottom:3px; }
 .dr-stat .value { font-size:15px; font-family:var(--mono); }
 .dr-sec { padding:16px 22px; border-bottom:1px solid var(--border); }
 .dr-sec h3 { font-size:11.5px; color:var(--text-muted); text-transform:uppercase;
   letter-spacing:.05em; margin-bottom:10px; }
-.dr-hold, .dr-trade { display:grid; align-items:center; gap:10px; padding:8px 0;
+.dr-hold, .dr-trade { display:grid; align-items:center; gap:10px;
+  padding:8px 6px; margin:0 -6px; border-radius:7px;
   border-bottom:1px solid var(--border); font-size:12.5px; }
-.dr-hold { grid-template-columns:1fr 92px 68px; }
+/* Grid items default to min-width:auto, so a cell never shrinks below its own
+   content: one long "0.123456 @ $65,947.52" widened its track, pushed the
+   fixed columns right and overflowed the row instead of fitting. minmax(0,…)
+   plus min-width:0 lets the tracks give, and the overflow rules below turn
+   what will not fit into an ellipsis rather than a spill. */
+.dr-hold > *, .dr-trade > * { min-width:0; }
+.dr-hold { grid-template-columns:minmax(0,1fr) minmax(0,92px) minmax(0,68px); }
 .dr-hold:last-child, .dr-trade:last-child { border-bottom:0; }
-.dr-trade { grid-template-columns:52px 1fr 84px 72px 108px; }
+.dr-trade { grid-template-columns:52px minmax(0,1fr) minmax(0,84px)
+  minmax(0,72px) minmax(0,108px); }
+/* The date is the first thing worth losing when the panel is narrow; the side,
+   symbol and amounts are not. */
+.dr-trade > :last-child, .dr-hold .ad-sub {
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dr-trade .ad-sub { display:block; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; }
+/* A row the eye can lock onto. With thirty near-identical monospace lines the
+   borders alone do not tell you which one you are reading, and there is no
+   selected state here to lean on. */
+.dr-hold:hover, .dr-trade:hover { background:var(--surface-2); }
 .dr-note { padding:14px 22px 26px; font-size:11.5px; color:var(--text-muted); line-height:1.5; }
 
 .site-foot {
@@ -1131,7 +1158,7 @@ html.force-mobile .status { flex:0 0 100%; justify-content:center; }
 /* ══ Internationalization ═══════════════════════════════════════════════ */
 const I18N = {
 en: {
-  adminStore:"Accounts", adminStoreSaved:"Saved", adminStoreTemp:"Not saved", adminStoreSavedHint:"Accounts, portfolios and standings are stored in a database and survive restarts.", adminStoreTempHint:"No database is connected — every account is erased when the server restarts or sleeps.",
+  adminStore:"Storage", adminStoreSaved:"Saved", adminStoreTemp:"Not saved", adminStoreSavedHint:"Accounts, portfolios and standings are stored in a database and survive restarts.", adminStoreTempHint:"No database is connected — every account is erased when the server restarts or sleeps.",
   cancel:"Cancel", confirmWord:"Confirm",
   loading:"Loading…", noHoldings:"No open holdings.", noTrades:"No trades yet.", recentTrades:"Recent trades",
   layout:"Layout", layoutAuto:"Automatic", layoutMobile:"Mobile", layoutDesktop:"Desktop",
@@ -1199,7 +1226,7 @@ en: {
   errGeneric:"Something went wrong. Please try again.",
 },
 hy: {
-  adminStore:"Հաշիվներ", adminStoreSaved:"Պահպանված", adminStoreTemp:"Չպահպանված", adminStoreSavedHint:"Հաշիվները, պորտֆելները և արդյունքները պահվում են տվյալների բազայում և պահպանվում վերագործարկումից հետո։", adminStoreTempHint:"Տվյալների բազա միացված չէ — բոլոր հաշիվները ջնջվում են սերվերի վերագործարկման ժամանակ։",
+  adminStore:"Պահոց", adminStoreSaved:"Պահպանված", adminStoreTemp:"Չպահպանված", adminStoreSavedHint:"Հաշիվները, պորտֆելները և արդյունքները պահվում են տվյալների բազայում և պահպանվում վերագործարկումից հետո։", adminStoreTempHint:"Տվյալների բազա միացված չէ — բոլոր հաշիվները ջնջվում են սերվերի վերագործարկման ժամանակ։",
   cancel:"Չեղարկել", confirmWord:"Հաստատել",
   loading:"Բեռնվում է…", noHoldings:"Բաց դիրքեր չկան։", noTrades:"Դեռ գործարքներ չկան։", recentTrades:"Վերջին գործարքները",
   layout:"Դասավորություն", layoutAuto:"Ավտոմատ", layoutMobile:"Բջջային", layoutDesktop:"Համակարգչային",
@@ -1267,7 +1294,7 @@ hy: {
   errGeneric:"Ինչ-որ բան սխալ գնաց։ Խնդրում ենք կրկին փորձել։",
 },
 uk: {
-  adminStore:"Акаунти", adminStoreSaved:"Збережено", adminStoreTemp:"Не збережено", adminStoreSavedHint:"Акаунти, портфелі та результати зберігаються в базі даних і переживають перезапуск.", adminStoreTempHint:"База даних не підключена — усі акаунти стираються при перезапуску сервера.",
+  adminStore:"Сховище", adminStoreSaved:"Збережено", adminStoreTemp:"Не збережено", adminStoreSavedHint:"Акаунти, портфелі та результати зберігаються в базі даних і переживають перезапуск.", adminStoreTempHint:"База даних не підключена — усі акаунти стираються при перезапуску сервера.",
   cancel:"Скасувати", confirmWord:"Підтвердити",
   loading:"Завантаження…", noHoldings:"Немає відкритих позицій.", noTrades:"Ще немає угод.", recentTrades:"Останні угоди",
   layout:"Макет", layoutAuto:"Автоматично", layoutMobile:"Мобільний", layoutDesktop:"Комп'ютерний",
@@ -1335,7 +1362,7 @@ uk: {
   errGeneric:"Щось пішло не так. Спробуйте ще раз.",
 },
 es: {
-  adminStore:"Cuentas", adminStoreSaved:"Guardadas", adminStoreTemp:"Sin guardar", adminStoreSavedHint:"Las cuentas, carteras y clasificaciones se guardan en una base de datos y sobreviven a los reinicios.", adminStoreTempHint:"No hay base de datos conectada: todas las cuentas se borran al reiniciar el servidor.",
+  adminStore:"Almacenamiento", adminStoreSaved:"Guardadas", adminStoreTemp:"Sin guardar", adminStoreSavedHint:"Las cuentas, carteras y clasificaciones se guardan en una base de datos y sobreviven a los reinicios.", adminStoreTempHint:"No hay base de datos conectada: todas las cuentas se borran al reiniciar el servidor.",
   cancel:"Cancelar", confirmWord:"Confirmar",
   loading:"Cargando…", noHoldings:"Sin posiciones abiertas.", noTrades:"Aún no hay operaciones.", recentTrades:"Operaciones recientes",
   layout:"Diseño", layoutAuto:"Automático", layoutMobile:"Móvil", layoutDesktop:"Escritorio",
@@ -1403,7 +1430,7 @@ es: {
   errGeneric:"Algo salió mal. Inténtalo de nuevo.",
 },
 el: {
-  adminStore:"Λογαριασμοί", adminStoreSaved:"Αποθηκευμένοι", adminStoreTemp:"Μη αποθηκευμένοι", adminStoreSavedHint:"Οι λογαριασμοί, τα χαρτοφυλάκια και οι κατατάξεις αποθηκεύονται σε βάση δεδομένων και επιβιώνουν των επανεκκινήσεων.", adminStoreTempHint:"Δεν υπάρχει συνδεδεμένη βάση δεδομένων — κάθε λογαριασμός διαγράφεται σε επανεκκίνηση.",
+  adminStore:"Αποθήκευση", adminStoreSaved:"Αποθηκευμένοι", adminStoreTemp:"Μη αποθηκευμένοι", adminStoreSavedHint:"Οι λογαριασμοί, τα χαρτοφυλάκια και οι κατατάξεις αποθηκεύονται σε βάση δεδομένων και επιβιώνουν των επανεκκινήσεων.", adminStoreTempHint:"Δεν υπάρχει συνδεδεμένη βάση δεδομένων — κάθε λογαριασμός διαγράφεται σε επανεκκίνηση.",
   cancel:"Άκυρο", confirmWord:"Επιβεβαίωση",
   loading:"Φόρτωση…", noHoldings:"Καμία ανοιχτή θέση.", noTrades:"Καμία συναλλαγή ακόμη.", recentTrades:"Πρόσφατες συναλλαγές",
   layout:"Διάταξη", layoutAuto:"Αυτόματη", layoutMobile:"Κινητό", layoutDesktop:"Υπολογιστή",
